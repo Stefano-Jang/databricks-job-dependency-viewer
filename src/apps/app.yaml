@@ -1,0 +1,13 @@
+command: [
+  "streamlit", 
+  "run",
+  "app.py"
+]
+
+env:
+  - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+    value: "false"
+  - name: DAG_TABLE_NAME
+    value: "shared.stefano_jiig.dag_relationships"
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "862f1d757f0424f7"

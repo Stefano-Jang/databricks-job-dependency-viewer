@@ -1,0 +1,6 @@
+resources:
+  apps:
+    job_dependency_graph:
+      name: 'jiig-streamlit-${bundle.target}'
+      description: 'Job and Pipeline dependency graph'
+      source_code_path: ../src/apps

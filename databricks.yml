@@ -15,7 +15,7 @@ variables:
     default: 1444828305810485
   account_name:
     description: Customer Name
-    default: Krafton
+    default: MyCompany 
   jiig_catalog:
     description: Base catalog
     default: shared
@@ -31,7 +31,8 @@ variables:
     default:
       # Only process last N days (None for all data)
       days_back: 30
-      # Find LDP errors from source_catalogs (delimiter: comma)
+      # Find LDP errors from source_catalogs (delimiter: comma, all: all)
+      #source_catalogs: all
       source_catalogs: shared,stefano-test-catalog
       # Save Error detection results to output_catalog.output_schema.dlt_error_analysis
       output_catalog: ${var.jiig_catalog}
@@ -64,6 +65,7 @@ targets:
       pipelines_development: true
       trigger_pause_status: PAUSED
       jobs_max_concurrent_runs: 1
+      source_linked_deployment: false
       tags:
         project: jiig
         creator: databricks
@@ -80,6 +82,7 @@ targets:
       pipelines_development: false
       trigger_pause_status: UNPAUSED
       jobs_max_concurrent_runs: 1
+      source_linked_deployment: false
       tags:
         project: jiig
         creator: databricks
