@@ -1,0 +1,877 @@
+{
+  "datasets": [
+    {
+      "name": "0194d28f",
+      "displayName": "Job Run Failure Analysis - Timeline Data",
+      "queryLines": [
+        "select * from identifier(:dashboard_table);\n"
+      ],
+      "parameters": [
+        {
+          "displayName": "dashboard_table",
+          "keyword": "dashboard_table",
+          "dataType": "STRING",
+          "defaultSelection": {
+            "values": {
+              "dataType": "STRING",
+              "values": [
+                {
+                  "value": "shared.stefano_jiig.jiig_dashboard_prod"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "5f01cc7c",
+      "displayName": "Failed Entity",
+      "layout": [
+        {
+          "widget": {
+            "name": "f7393249",
+            "queries": [
+              {
+                "name": "dashboards/01f087b29e471eaf8c5115baae819de7/datasets/01f087b29e481195952587c106bf845b_minutely(last_failed_time)",
+                "query": {
+                  "datasetName": "0194d28f",
+                  "fields": [
+                    {
+                      "name": "minutely(last_failed_time)",
+                      "expression": "DATE_TRUNC(\"MINUTE\", `last_failed_time`)"
+                    },
+                    {
+                      "name": "minutely(last_failed_time)_associativity",
+                      "expression": "COUNT_IF(`associative_filter_predicate_group`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "filter-date-range-picker",
+              "encodings": {
+                "fields": [
+                  {
+                    "fieldName": "minutely(last_failed_time)",
+                    "displayName": "last_failed_time",
+                    "queryName": "dashboards/01f087b29e471eaf8c5115baae819de7/datasets/01f087b29e481195952587c106bf845b_minutely(last_failed_time)"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Period"
+              },
+              "selection": {
+                "defaultSelection": {
+                  "range": {
+                    "dataType": "DATETIME",
+                    "min": {
+                      "value": "now-24h/h"
+                    },
+                    "max": {
+                      "value": "now/h"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 0,
+            "width": 3,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "1145dba4",
+            "multilineTextboxSpec": {
+              "lines": [
+                "# Job & Pipeline Failed List\n",
+                "- Impact analysis is performed on tables that previously had correlations in system.access.table_lineage.\n",
+                "- Targets job_run entries from system.lakeflow.job_run_timeline with states ERROR, FAILED, or TIMED_OUT.\n",
+                "- For this dashboard to display correctly, the following two additional tables are required:\n",
+                "  - A table mapping user IDs to emails\n",
+                "  - A table recording errors that occurred during pipeline updates\n",
+                "- Depending on the collection interval of the pipeline failure collection job, pipeline failures may be delayed."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 2,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "9cee1dcc",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "0194d28f",
+                  "fields": [
+                    {
+                      "name": "countdistinct(failed_id)",
+                      "expression": "COUNT(DISTINCT `failed_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(failed_id)",
+                  "style": {
+                    "bold": true,
+                    "color": {
+                      "themeColorType": "visualizationColors",
+                      "position": 4
+                    }
+                  },
+                  "displayName": "Count of Unique failed_id"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Failed Entity IDs",
+                "showDescription": true,
+                "description": "Distinct count of failed Jobs or Pipelines"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 1,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "f68e63cc",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "0194d28f",
+                  "fields": [
+                    {
+                      "name": "countdistinct(affected_id)",
+                      "expression": "COUNT(DISTINCT `affected_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(affected_id)",
+                  "style": {
+                    "bold": true,
+                    "color": {
+                      "themeColorType": "visualizationColors",
+                      "position": 4
+                    }
+                  },
+                  "displayName": "Count of Unique affected_id"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Affected Entity IDs",
+                "showDescription": true,
+                "description": "Distinct count of affected Jobs or Pipelines"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 1,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "b95ec3ef",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "0194d28f",
+                  "fields": [
+                    {
+                      "name": "countdistinct(affected_creator_email)",
+                      "expression": "COUNT(DISTINCT `affected_creator_email`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "countdistinct(affected_creator_email)",
+                  "style": {
+                    "bold": true,
+                    "color": {
+                      "themeColorType": "visualizationColors",
+                      "position": 1
+                    }
+                  },
+                  "displayName": "Count of Unique affected_creator_email"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Affected Creator Emails",
+                "showDescription": true,
+                "description": "Distinct count of affected creator emails"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 1,
+            "width": 1,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "12f4af0e",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "0194d28f",
+                  "fields": [
+                    {
+                      "name": "max(last_failed_time)",
+                      "expression": "MAX(`last_failed_time`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "max(last_failed_time)",
+                  "style": {
+                    "italic": true,
+                    "color": {
+                      "themeColorType": "visualizationColors",
+                      "position": 3
+                    }
+                  },
+                  "displayName": "Maximum last_failed_time"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Last failed time (UTC+0)",
+                "showDescription": true,
+                "description": "Latest time of job or pipeline failed"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 3,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "e07f46cd",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "0194d28f",
+                  "fields": [
+                    {
+                      "name": "minutely(last_failed_time)",
+                      "expression": "DATE_TRUNC(\"MINUTE\", `last_failed_time`)"
+                    },
+                    {
+                      "name": "countdistinct(failed_id)",
+                      "expression": "COUNT(DISTINCT `failed_id`)"
+                    },
+                    {
+                      "name": "countdistinct(affected_id)",
+                      "expression": "COUNT(DISTINCT `affected_id`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "combo",
+              "encodings": {
+                "y": {
+                  "primary": {
+                    "fields": [
+                      {
+                        "fieldName": "countdistinct(failed_id)",
+                        "displayName": "Count of Unique failed_id"
+                      }
+                    ],
+                    "scale": {
+                      "type": "quantitative"
+                    }
+                  },
+                  "secondary": {
+                    "fields": [
+                      {
+                        "fieldName": "countdistinct(affected_id)",
+                        "displayName": "Count of Unique affected_id"
+                      }
+                    ],
+                    "scale": {
+                      "type": "quantitative"
+                    }
+                  }
+                },
+                "label": {
+                  "show": true
+                },
+                "color": {
+                  "legend": {
+                    "position": "bottom",
+                    "hideTitle": false,
+                    "hide": false
+                  }
+                },
+                "x": {
+                  "fieldName": "minutely(last_failed_time)",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "axis": {
+                    "labelAngle": 45
+                  },
+                  "format": {
+                    "type": "date-time",
+                    "date": "locale-number-month",
+                    "time": "locale-hour-minute",
+                    "leadingZeros": false
+                  },
+                  "displayName": "last_failed_time"
+                }
+              },
+              "mark": {
+                "colors": [
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 4
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 7
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 3
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 4
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 5
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 6
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 7
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 8
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 9
+                  },
+                  {
+                    "themeColorType": "visualizationColors",
+                    "position": 10
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 6,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "2ffe5958",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "0194d28f",
+                  "fields": [
+                    {
+                      "name": "last_failed_time",
+                      "expression": "`last_failed_time`"
+                    },
+                    {
+                      "name": "failed_id",
+                      "expression": "`failed_id`"
+                    },
+                    {
+                      "name": "failed_name",
+                      "expression": "`failed_name`"
+                    },
+                    {
+                      "name": "failed_type",
+                      "expression": "`failed_type`"
+                    },
+                    {
+                      "name": "affected_id",
+                      "expression": "`affected_id`"
+                    },
+                    {
+                      "name": "affected_type",
+                      "expression": "`affected_type`"
+                    },
+                    {
+                      "name": "affected_name",
+                      "expression": "`affected_name`"
+                    },
+                    {
+                      "name": "affected_creator_email",
+                      "expression": "`affected_creator_email`"
+                    },
+                    {
+                      "name": "affected_run_as_email",
+                      "expression": "`affected_run_as_email`"
+                    },
+                    {
+                      "name": "affected_tables",
+                      "expression": "`affected_tables`"
+                    },
+                    {
+                      "name": "affected_descriptions",
+                      "expression": "`affected_descriptions`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 1,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "last_failed_time",
+                    "dateTimeFormat": "DD/MM/YYYY HH:mm:ss.SSS",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "datetime",
+                    "displayAs": "datetime",
+                    "visible": true,
+                    "order": 0,
+                    "title": "last_failed_time",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "last_failed_time"
+                  },
+                  {
+                    "fieldName": "failed_id",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "https://e2-demo-field-eng.cloud.databricks.com/{{failed_type}}s/{{failed_id}}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "link",
+                    "visible": true,
+                    "order": 1,
+                    "title": "failed_id",
+                    "allowSearch": true,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "cellFormat": {
+                      "default": {
+                        "foregroundColor": null
+                      },
+                      "rules": []
+                    },
+                    "displayName": "failed_id"
+                  },
+                  {
+                    "fieldName": "failed_name",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 2,
+                    "title": "failed_name",
+                    "allowSearch": true,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "failed_name"
+                  },
+                  {
+                    "fieldName": "failed_type",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 3,
+                    "title": "failed_type",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "failed_type"
+                  },
+                  {
+                    "fieldName": "affected_id",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "https://e2-demo-field-eng.cloud.databricks.com/{{affected_type}}s/{{affected_id}}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "link",
+                    "visible": true,
+                    "order": 4,
+                    "title": "affected_id",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "affected_id"
+                  },
+                  {
+                    "fieldName": "affected_type",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 5,
+                    "title": "affected_type",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "affected_type"
+                  },
+                  {
+                    "fieldName": "affected_name",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 6,
+                    "title": "affected_name",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "affected_name"
+                  },
+                  {
+                    "fieldName": "affected_creator_email",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 7,
+                    "title": "affected_creator_email",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "affected_creator_email"
+                  },
+                  {
+                    "fieldName": "affected_run_as_email",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 8,
+                    "title": "affected_run_as_email",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "affected_run_as_email"
+                  },
+                  {
+                    "fieldName": "affected_tables",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 9,
+                    "title": "affected_tables",
+                    "allowSearch": true,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "affected_tables"
+                  },
+                  {
+                    "fieldName": "affected_descriptions",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 10,
+                    "title": "affected_descriptions",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "affected_descriptions"
+                  }
+                ]
+              },
+              "invisibleColumns": [],
+              "allowHTMLByDefault": false,
+              "itemsPerPage": 10,
+              "paginationSize": "default",
+              "condensed": true,
+              "withRowNumber": false,
+              "firstNFrozenColumns": 2
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 8
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS"
+    },
+    {
+      "name": "5c63bc5c",
+      "displayName": "Global Filters",
+      "pageType": "PAGE_TYPE_GLOBAL_FILTERS"
+    }
+  ],
+  "uiSettings": {
+    "locale": "en-US",
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "widgetBackgroundColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "widgetBorderColor": {
+        "light": "#FFFFFF",
+        "dark": "#11171C"
+      },
+      "fontColor": {
+        "light": "#11171C",
+        "dark": "#E8ECF0"
+      },
+      "selectionColor": {
+        "light": "#2272B4",
+        "dark": "#8ACAFF"
+      },
+      "visualizationColors": [
+        "#077A9D",
+        "#FFAB00",
+        "#00A972",
+        "#FF3621",
+        "#8BCAE7",
+        "#AB4057",
+        "#99DDB4",
+        "#FCA4A1",
+        "#919191",
+        "#BF7080"
+      ],
+      "widgetHeaderAlignment": "LEFT"
+    }
+  }
+}

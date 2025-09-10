@@ -1,0 +1,89 @@
+# This is a Databricks asset bundle definition for jiig.
+# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+bundle:
+  name: jiig
+  uuid: 2cc4ebc9-744c-422b-b6ba-864288ec70c0
+
+variables:
+  # The "warehouse_id" variable is used to reference the warehouse used by the dashboard.
+  warehouse_id:
+    lookup:
+      # Replace this with the name of your SQL warehouse.
+      warehouse: dbdemos-shared-endpoint
+  workspace_id:
+    description: workspace id
+    default: 1444828305810485
+  account_name:
+    description: Customer Name
+    default: Krafton
+  jiig_catalog:
+    description: Base catalog
+    default: shared
+  jiig_schema:
+    description: Base schema
+    default: stefano_jiig
+  user_id_map_table_name:
+    description: Target table name of user ID and email mapping job
+    default: ${var.jiig_catalog}.${var.jiig_schema}.user_id_map_${bundle.target}
+  ldp_error_table:
+    description: Target table name of LDP update error detection job
+    type: complex
+    default:
+      # Only process last N days (None for all data)
+      days_back: 30
+      # Find LDP errors from source_catalogs (delimiter: comma)
+      source_catalogs: shared,stefano-test-catalog
+      # Save Error detection results to output_catalog.output_schema.dlt_error_analysis
+      output_catalog: ${var.jiig_catalog}
+      output_schema: ${var.jiig_schema}
+      full_name: ${var.ldp_error_table.output_catalog}.${var.ldp_error_table.output_schema}.dlt_error_analysis
+  jiig_dag_table:
+    description: Table for network node and edge information
+    default: ${var.jiig_catalog}.${var.jiig_schema}.dag_relationships_${bundle.target}
+  dashboard_table:
+    description: Table for dashboard information
+    default: ${var.jiig_catalog}.${var.jiig_schema}.jiig_dashboard_${bundle.target}
+
+include:
+  - resources/*.yml
+  - resources/*/*.yml
+
+targets:
+  dev:
+    # The default target uses 'mode: development' to create a development copy.
+    # - Deployed resources get prefixed with '[dev my_user_name]'
+    # - Any job schedules and triggers are paused by default.
+    # See also https://docs.databricks.com/dev-tools/bundles/deployment-modes.html.
+    mode: development
+    default: true
+    workspace:
+      host: https://e2-demo-field-eng.cloud.databricks.com
+      root_path: /Workspace/Users/stefano.jang@databricks.com/.bundle/${bundle.name}/${bundle.target}
+    presets:
+      name_prefix: '[DEV-JIIG-${workspace.current_user.short_name}]'
+      pipelines_development: true
+      trigger_pause_status: PAUSED
+      jobs_max_concurrent_runs: 1
+      tags:
+        project: jiig
+        creator: databricks
+        environment: dev
+
+  prod:
+    mode: production
+    workspace:
+      host: https://e2-demo-field-eng.cloud.databricks.com
+      # We explicitly deploy to /Workspace/Users/stefano.jang@databricks.com to make sure we only have a single copy.
+      root_path: /Workspace/Users/stefano.jang@databricks.com/.bundle/${bundle.name}/${bundle.target}
+    presets:
+      name_prefix: '[PRD-JIIG]'
+      pipelines_development: false
+      trigger_pause_status: UNPAUSED
+      jobs_max_concurrent_runs: 1
+      tags:
+        project: jiig
+        creator: databricks
+        environment: prd
+    permissions:
+      - user_name: stefano.jang@databricks.com
+        level: CAN_MANAGE
