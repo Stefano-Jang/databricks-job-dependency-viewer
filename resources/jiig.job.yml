@@ -1,0 +1,73 @@
+# The main job for jiig.
+resources:
+  jobs:
+    jiig_job:
+      name: ${var.account_name}_jiig_job
+      
+      parameters:
+        - name: workspace_id
+          default: ${var.workspace_id}
+        - name: user_id_map_table_name
+          default: ${var.user_id_map_table_name}
+        - name: ldp_error_table.days_back
+          default: ${var.ldp_error_table.days_back}
+        - name: ldp_error_table.source_catalogs
+          default: ${var.ldp_error_table.source_catalogs}
+        - name: ldp_error_table.output_catalog
+          default: ${var.ldp_error_table.output_catalog}
+        - name: ldp_error_table.output_schema
+          default: ${var.ldp_error_table.output_schema}
+        - name: ldp_error_table_full_name
+          default: ${var.ldp_error_table.full_name}
+        - name: jiig_dag_table
+          default: ${var.jiig_dag_table}
+        - name: dashboard_table
+          default: ${var.dashboard_table}
+
+      schedule:
+        quartz_cron_expression: 0 0/30 * * * ?
+        timezone_id: UTC
+
+      #email_notifications:
+      #  on_failure:
+      #    - your_email@example.com
+
+      tasks:
+        - task_key: jiig_ldp_analysis 
+          notebook_task:
+            notebook_path: ../src/job/jiig-ldp-analysis.ipynb
+          environment_key: default
+
+        - task_key: jiig_userid_map
+          notebook_task:
+            notebook_path: ../src/job/jiig-userid-map.ipynb
+          environment_key: default
+        
+        - task_key: jiig_dag_table
+          sql_task:
+            file: 
+              path: ../src/job/jiig-dag-table-creation.sql
+              source: WORKSPACE
+            warehouse_id: ${var.warehouse_id}
+          depends_on:
+            - task_key: jiig_ldp_analysis
+            - task_key: jiig_userid_map
+        
+        - task_key: jiig_dashboard_table
+          sql_task:
+            file:
+              path: ../src/job/jiig-dashboard-table-creation.sql
+              source: WORKSPACE
+            warehouse_id: ${var.warehouse_id}
+          depends_on:
+            - task_key: jiig_ldp_analysis
+            - task_key: jiig_userid_map
+
+      # A list of task execution environment specifications that can be referenced by tasks of this job.
+      environments:
+        - environment_key: default
+
+          # Full documentation of this spec can be found at:
+          # https://docs.databricks.com/api/workspace/jobs/create#environments-spec
+          spec:
+            client: "3"
