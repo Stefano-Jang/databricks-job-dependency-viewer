@@ -8,12 +8,14 @@ assert os.getenv('DATABRICKS_WAREHOUSE_ID'), "DATABRICKS_WAREHOUSE_ID must be se
 assert os.getenv('DAG_TABLE_NAME'), "DAG_TABLE_NAME must be set in app.yaml or environment."
 DAG_TABLE_NAME = os.getenv('DAG_TABLE_NAME')
 
+user_token = st.context.headers.get('X-Forwarded-Access-Token')
+
 def query_databricks(query: str) -> pd.DataFrame:
     try:
         cfg = Config()  # Auto-pulls environment variables for auth
         with sql.connect( 
             server_hostname=cfg.host,
-            http_path=f"/sql/1.0/warehouses/{os.getenv('DATABRICKS_WAREHOUSE_ID')}",
+            http_path=f"/sql/1.0/warehouses/{cfg.warehouse_id}",
             credentials_provider=lambda: cfg.authenticate
         ) as connection:
             with connection.cursor() as cursor:

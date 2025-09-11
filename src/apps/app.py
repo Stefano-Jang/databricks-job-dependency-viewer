@@ -116,7 +116,7 @@ def transform_to_st_link_analysis_format(df: pd.DataFrame):
             "entity_type": entity_type,
             "status": str(node.get("status", "")),
             "failure_count": int(node.get("failure_count", 0)) if pd.notna(node.get("failure_count")) else 0,
-            "created_time": str(node.get("created_time") or ""),
+            "last_modified_time": str(node.get("created_time") or ""),
             "last_failed_time": str(node.get("last_failed_time") or ""),
             "job_id": str(node.get("job_id") or ""),
             "pipeline_id": str(node.get("pipeline_id") or ""),
