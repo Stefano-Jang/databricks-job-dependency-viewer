@@ -137,6 +137,7 @@ warehouse_id:
 ```
 
 ### Requirements and Operation
+* You should have USE SCHEMA permission for the LDP source catalogs
 * Serverless should be enabled in your workspace.
 * Every job failure detection table is newly generated every 30 minutes, to accelerate you should manually run the jiig job.
 * System tables don't have Lakeflow Declarative Pipelines(LDP) event logs for now. So we're using LDP event colsolidator
