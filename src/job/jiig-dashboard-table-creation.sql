@@ -6,6 +6,18 @@ DECLARE OR REPLACE LDP_ERR_TBL STRING DEFAULT {{ldp_error_table_full_name}};
 DECLARE OR REPLACE TARGET_WORKSPACE_ID STRING DEFAULT {{workspace_id}};
 DECLARE OR REPLACE DASHBOARD_TABLE STRING DEFAULT {{dashboard_table}};
 
+CREATE if not exists table identifier(LDP_ERR_TBL)(
+  pipeline_name STRING,
+  pipeline_id STRING,
+  event_type STRING,
+  error_count BIGINT,
+  affected_runs BIGINT,
+  first_error TIMESTAMP,
+  last_error TIMESTAMP,
+  sample_error_messages ARRAY<STRING>,
+  sample_message STRING)
+);
+
 -- =========================
 -- (1) 실패 런 수집 (JOB)
 -- =========================

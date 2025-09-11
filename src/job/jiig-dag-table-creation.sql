@@ -9,6 +9,18 @@ DECLARE OR REPLACE DAG_TBL STRING DEFAULT {{jiig_dag_table}};
 DECLARE OR REPLACE REFERENCE_TIME TIMESTAMP DEFAULT CURRENT_TIMESTAMP();
 DECLARE TIME_WINDOW_HOURS INTERVAL DAY DEFAULT INTERVAL 1 DAY;
 
+CREATE if not exists table identifier(LDP_ERR_TBL)(
+  pipeline_name STRING,
+  pipeline_id STRING,
+  event_type STRING,
+  error_count BIGINT,
+  affected_runs BIGINT,
+  first_error TIMESTAMP,
+  last_error TIMESTAMP,
+  sample_error_messages ARRAY<STRING>,
+  sample_message STRING)
+);
+
 -- Step 1: Create the table (run once)
 CREATE OR REPLACE TABLE identifier(DAG_TBL) AS (
 -- =========================

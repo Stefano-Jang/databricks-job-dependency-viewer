@@ -137,10 +137,12 @@ warehouse_id:
 ```
 
 ### Requirements and Operation
-* You should have USE SCHEMA permission for the LDP source catalogs
+* This is administration service, **WORKSPACE_ADMIN** permission is required.
+   * If not, permission to read system catalog is required.
+   * If you don't have read permissions for tables under the **ldp_error_table.source_catalogs**, pipeline failures cannot be detected (TBD).
 * Serverless should be enabled in your workspace.
 * Every job failure detection table is newly generated every 30 minutes, to accelerate you should manually run the jiig job.
-* System tables don't have Lakeflow Declarative Pipelines(LDP) event logs for now. So we're using LDP event colsolidator
+* System tables don't have Lakeflow Declarative Pipelines(LDP) event logs for now. So we're using LDP event colsolidator.
    * see: [LDP event consolidator by Alex Linke](https://github.com/alinke5/LDP_eventLog_consolidator)
 
 ### Contribution
