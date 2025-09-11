@@ -15,7 +15,7 @@ CREATE table if not exists identifier(LDP_ERR_TBL)(
   first_error TIMESTAMP,
   last_error TIMESTAMP,
   sample_error_messages ARRAY<STRING>,
-  sample_message STRING)
+  sample_message STRING
 );
 
 -- =========================
