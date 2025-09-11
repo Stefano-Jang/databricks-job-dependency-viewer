@@ -6,7 +6,7 @@ DECLARE OR REPLACE LDP_ERR_TBL STRING DEFAULT {{ldp_error_table_full_name}};
 DECLARE OR REPLACE TARGET_WORKSPACE_ID STRING DEFAULT {{workspace_id}};
 DECLARE OR REPLACE DASHBOARD_TABLE STRING DEFAULT {{dashboard_table}};
 
-CREATE if not exists table identifier(LDP_ERR_TBL)(
+CREATE table if not exists identifier(LDP_ERR_TBL)(
   pipeline_name STRING,
   pipeline_id STRING,
   event_type STRING,
