@@ -106,6 +106,20 @@ warehouse_id:
     default: ${var.jiig_catalog}.${var.jiig_schema}.jiig_dashboard_${bundle.target}
 ```
 
+### Modify src/apps/app.yaml
+```yaml
+  - name: DAG_TABLE_NAME
+    value: "shared.stefano_jiig.dag_relationships"
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "862f1d757f0424f7"
+```
+You can find warehouse id in COMPUTE > SQL WAREHOUSE
+![warehouse_id](resources/figures/jiig_warehouse_id.png)
+
+### After deploy, modify and re-publish dashboard dataset variable
+- Find dashboard, go to draft mode, change dashboard_table variable to yours
+- Default : CHANGE.ME.PLEASE
+
 ### Project Structure
 ```
 .
@@ -148,6 +162,8 @@ warehouse_id:
 * Every job failure detection table is newly generated every 30 minutes, to accelerate you should manually run the jiig job.
 * System tables don't have Lakeflow Declarative Pipelines(LDP) event logs for now. So we're using LDP event colsolidator.
    * see: [LDP event consolidator by Alex Linke](https://github.com/alinke5/LDP_eventLog_consolidator)
+* On-behalf-of user authorization for Apps should be enabled
+   ![obo](resources/figures/jiig_obo.png)
 
 ### Contribution
 We are waiting your pull requests. Please leave any idea about dashboard and graph.

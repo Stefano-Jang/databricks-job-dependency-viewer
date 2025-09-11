@@ -4,3 +4,4 @@ resources:
       name: 'jiig-streamlit-${bundle.target}'
       description: 'Job and Pipeline dependency graph'
       source_code_path: ../src/apps
+      user_api_scopes: ['sql', 'catalog.tables:read', 'catalog.schemas:read', 'catalog.catalogs:read']

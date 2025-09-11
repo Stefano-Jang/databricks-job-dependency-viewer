@@ -1,5 +1,1 @@
-streamlit
 st-link-analysis
-pandas
-databricks-sql-connector
-python-dotenv
