@@ -16,7 +16,7 @@ def query_databricks(query: str) -> pd.DataFrame:
         with sql.connect( 
             server_hostname=cfg.host,
             http_path=f"/sql/1.0/warehouses/{cfg.warehouse_id}",
-            credentials_provider=lambda: cfg.authenticate
+            access_token=user_token,
         ) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(query)
