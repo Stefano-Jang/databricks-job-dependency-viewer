@@ -6,7 +6,7 @@ DECLARE OR REPLACE LDP_ERR_TBL STRING DEFAULT {{ldp_error_table_full_name}};
 DECLARE OR REPLACE TARGET_WORKSPACE_ID STRING DEFAULT {{workspace_id}};
 DECLARE OR REPLACE DAG_TBL STRING DEFAULT {{jiig_dag_table}};
 
--- 최근 Healthy 노드 포함 범위 (기본: 24시간)
+-- Activity inclusion window (default: last 24 hours)
 DECLARE OR REPLACE RECENT_WINDOW_HOURS INTERVAL DAY DEFAULT INTERVAL 1 DAY;
 
 CREATE TABLE IF NOT EXISTS identifier(LDP_ERR_TBL)(
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS identifier(LDP_ERR_TBL)(
 
 CREATE OR REPLACE TABLE identifier(DAG_TBL) AS (
 -- ============================================
--- 0) 공통 시간 경계
+-- 0) Time bounds
 -- ============================================
 WITH time_bounds AS (
   SELECT
@@ -32,16 +32,15 @@ WITH time_bounds AS (
 ),
 
 -- ============================================
--- 1) 실패 런 수집 (JOB) – Dashboard 기준 정합
+-- 1) Failed job runs (dashboard-aligned)
 -- ============================================
 fail_runs_job AS (
   SELECT DISTINCT
-    job_id,
-    run_id,
-    COALESCE(period_end_time, period_start_time) AS failed_at
+    jt.job_id,
+    jt.run_id,
+    COALESCE(jt.period_end_time, jt.period_start_time) AS failed_at
   FROM system.lakeflow.job_run_timeline jt
-  JOIN time_bounds t
-    ON 1=1
+  JOIN time_bounds t ON 1=1
   WHERE jt.workspace_id = TARGET_WORKSPACE_ID
     AND jt.result_state IN ('FAILED','ERROR','TIMED_OUT')
     AND jt.run_type = 'JOB_RUN'
@@ -58,8 +57,7 @@ failed_jobs_last AS (
 ),
 
 -- ============================================
--- 2) 실패 런 수집 (PIPELINE) – Dashboard 기준 정합
---    LDP_ERR_TBL.last_error 사용
+-- 2) Failed pipelines (dashboard-aligned via LDP_ERR_TBL)
 -- ============================================
 failed_pipelines_last AS (
   SELECT
@@ -72,7 +70,7 @@ failed_pipelines_last AS (
 ),
 
 -- ============================================
--- 3) 실패 엔터티 마스터 (JOB + PIPELINE) – Dashboard와 동일 철학
+-- 3) Failed entity master (JOB + PIPELINE)
 -- ============================================
 failed_entity_master AS (
   -- JOB
@@ -90,7 +88,8 @@ failed_entity_master AS (
     fj.failure_count
   FROM system.lakeflow.jobs j
   JOIN failed_jobs_last fj ON j.job_id = fj.job_id
-  WHERE array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
+  WHERE j.workspace_id = TARGET_WORKSPACE_ID
+    AND array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
 
   UNION ALL
   -- PIPELINE
@@ -108,17 +107,16 @@ failed_entity_master AS (
     fp.failure_count
   FROM system.lakeflow.pipelines p
   JOIN failed_pipelines_last fp ON p.pipeline_id = fp.pipeline_id
+  WHERE p.workspace_id = TARGET_WORKSPACE_ID
 ),
 
 -- ============================================
--- 4) 최근 활동 엔터티 수집 (Healthy 포함 범위 축소)
---    - JOB: 최근 24h 내 period_end_time 존재
---    - PIPELINE: 최근 24h 내 lineage 이벤트 또는
---                최근 24h 내 활동 JOB/실패 엔터티와의 연결로 유입
+-- 4) Recent activity sets (24h window)
+--     - JOB: any run activity in window (success/failure both)
+--     - PIPELINE: lineage events in window
 -- ============================================
 recent_job_activity AS (
-  SELECT DISTINCT
-    jt.job_id
+  SELECT DISTINCT jt.job_id
   FROM system.lakeflow.job_run_timeline jt
   JOIN time_bounds t ON 1=1
   WHERE jt.workspace_id = TARGET_WORKSPACE_ID
@@ -126,22 +124,35 @@ recent_job_activity AS (
     AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.since_ts
 ),
 
+-- Last activity time for JOBs (any result_state)
+job_last_activity AS (
+  SELECT
+    jt.job_id,
+    MAX(COALESCE(jt.period_end_time, jt.period_start_time)) AS last_activity_time
+  FROM system.lakeflow.job_run_timeline jt
+  JOIN time_bounds t ON 1=1
+  WHERE jt.workspace_id = TARGET_WORKSPACE_ID
+    AND jt.run_type = 'JOB_RUN'
+    AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.since_ts
+  GROUP BY jt.job_id
+),
+
 lineage AS (
   SELECT
-    event_time,
-    entity_type,                         -- 'JOB' or 'PIPELINE'
-    entity_id,
-    source_table_full_name,
-    target_table_full_name,
-    source_type,
-    target_type,
-    entity_metadata.job_info.job_id                   AS job_id,
-    entity_metadata.job_info.job_run_id               AS job_run_id,
-    entity_metadata.dlt_pipeline_info.dlt_pipeline_id AS dlt_pipeline_id,
-    entity_metadata.dlt_pipeline_info.dlt_update_id   AS dlt_update_id
-  FROM system.access.table_lineage
-  WHERE workspace_id = TARGET_WORKSPACE_ID
-    AND entity_type IN ('JOB','PIPELINE')
+    l.event_time,
+    l.entity_type,                         -- 'JOB' or 'PIPELINE'
+    l.entity_id,
+    l.source_table_full_name,
+    l.target_table_full_name,
+    l.source_type,
+    l.target_type,
+    l.entity_metadata.job_info.job_id                   AS job_id,
+    l.entity_metadata.job_info.job_run_id               AS job_run_id,
+    l.entity_metadata.dlt_pipeline_info.dlt_pipeline_id AS dlt_pipeline_id,
+    l.entity_metadata.dlt_pipeline_info.dlt_update_id   AS dlt_update_id
+  FROM system.access.table_lineage l
+  WHERE l.workspace_id = TARGET_WORKSPACE_ID
+    AND l.entity_type IN ('JOB','PIPELINE')
 ),
 
 recent_pipeline_activity AS (
@@ -153,26 +164,42 @@ recent_pipeline_activity AS (
     AND l.event_time >= t.since_ts
 ),
 
+-- Last activity time for PIPELINEs (lineage event time)
+pipeline_last_activity AS (
+  SELECT
+    l.dlt_pipeline_id AS pipeline_id,
+    MAX(l.event_time) AS last_activity_time
+  FROM lineage l
+  JOIN time_bounds t ON 1=1
+  WHERE l.entity_type = 'PIPELINE'
+    AND l.event_time >= t.since_ts
+  GROUP BY l.dlt_pipeline_id
+),
+
 -- ============================================
--- 5) 전체 “활성(Active)” 엔터티 집합
---    - 실패 엔터티(대시보드 기준)
---    - 또는 최근 활동 JOB / 최근 활동 PIPELINE
+-- 5) Active entity sets
 -- ============================================
 active_jobs AS (
   SELECT DISTINCT j.job_id AS entity_id
   FROM system.lakeflow.jobs j
-  WHERE array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
-    AND (j.job_id IN (SELECT job_id FROM failed_jobs_last)
-         OR j.job_id IN (SELECT job_id FROM recent_job_activity))
+  WHERE j.workspace_id = TARGET_WORKSPACE_ID
+    AND array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
+    AND (
+      j.job_id IN (SELECT job_id FROM failed_jobs_last)
+      OR j.job_id IN (SELECT job_id FROM recent_job_activity)
+    )
 ),
 active_pipelines AS (
   SELECT DISTINCT p.pipeline_id AS entity_id
   FROM system.lakeflow.pipelines p
-  WHERE p.pipeline_id IN (SELECT pipeline_id FROM failed_pipelines_last)
-     OR p.pipeline_id IN (SELECT pipeline_id FROM recent_pipeline_activity)
+  WHERE p.workspace_id = TARGET_WORKSPACE_ID
+    AND (
+      p.pipeline_id IN (SELECT pipeline_id FROM failed_pipelines_last)
+      OR p.pipeline_id IN (SELECT pipeline_id FROM recent_pipeline_activity)
+    )
 ),
 all_entity_master AS (
-  -- JOB 메타
+  -- JOB meta
   SELECT
     'JOB'                         AS entity_type,
     j.job_id                      AS entity_id,
@@ -184,11 +211,12 @@ all_entity_master AS (
     NULL                          AS entity_run_as_email,
     j.change_time                 AS entity_created_time
   FROM system.lakeflow.jobs j
-  WHERE array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
+  WHERE j.workspace_id = TARGET_WORKSPACE_ID
+    AND array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
     AND j.job_id IN (SELECT entity_id FROM active_jobs)
 
   UNION ALL
-  -- PIPELINE 메타
+  -- PIPELINE meta
   SELECT
     'PIPELINE'                    AS entity_type,
     p.pipeline_id                 AS entity_id,
@@ -200,12 +228,12 @@ all_entity_master AS (
     p.run_as                      AS entity_run_as_email,
     p.change_time                 AS entity_created_time
   FROM system.lakeflow.pipelines p
-  WHERE p.pipeline_id IN (SELECT entity_id FROM active_pipelines)
+  WHERE p.workspace_id = TARGET_WORKSPACE_ID
+    AND p.pipeline_id IN (SELECT entity_id FROM active_pipelines)
 ),
 
 -- ============================================
--- 6) 엔터티가 쓰는(생산) 타깃 테이블 / 읽는(소비) 소스 테이블
---    * 엣지는 target -> source 일치로 구성 (자기참조 제외)
+-- 6) Entity target/source tables (for edges)
 -- ============================================
 entity_target_tables AS (
   SELECT DISTINCT
@@ -237,8 +265,7 @@ entity_source_tables AS (
 ),
 
 -- ============================================
--- 7) 엔터티 간 관계(엣지) – 다양성/정확성 강화
---    동일 테이블을 매개로 생산자→소비자 연결, 자기참조 제거
+-- 7) Inter-entity relationships (edges) via common table, disallow self
 -- ============================================
 entity_relationships AS (
   SELECT DISTINCT
@@ -256,7 +283,7 @@ entity_relationships AS (
 ),
 
 -- ============================================
--- 8) 실패 상태/이메일 매핑 결합
+-- 8) Join failure status, last activity timestamps, and emails
 -- ============================================
 entity_master_complete AS (
   SELECT
@@ -274,6 +301,8 @@ entity_master_complete AS (
     COALESCE(fj.last_failed_time,  fp.last_failed_time)  AS last_failed_time,
     COALESCE(fj.first_failed_time, fp.first_failed_time) AS first_failed_time,
     COALESCE(fj.failure_count,     fp.failure_count, 0)  AS failure_count,
+    /* last_activity_time: union of job/pipeline activity within 24h window */
+    COALESCE(ja.last_activity_time, pa.last_activity_time) AS last_activity_time,
     aem.entity_created_time AS entity_created_time,
     CASE WHEN aem.entity_type='JOB'      THEN aem.entity_id END AS original_job_id,
     CASE WHEN aem.entity_type='PIPELINE' THEN aem.entity_id END AS original_pipeline_id
@@ -286,46 +315,51 @@ entity_master_complete AS (
     ON aem.entity_type='JOB' AND aem.entity_id=fj.job_id
   LEFT JOIN failed_pipelines_last fp
     ON aem.entity_type='PIPELINE' AND aem.entity_id=fp.pipeline_id
+  LEFT JOIN job_last_activity ja
+    ON aem.entity_type='JOB' AND aem.entity_id = ja.job_id
+  LEFT JOIN pipeline_last_activity pa
+    ON aem.entity_type='PIPELINE' AND aem.entity_id = pa.pipeline_id
 ),
 
 -- ============================================
--- 9) DAG 노드/엣지 (출력 스키마 유지)
+-- 9) DAG nodes/edges (final schema construction)
 -- ============================================
 dag_nodes AS (
   SELECT
-    entity_id                        AS node_id,
-    lower(entity_type)               AS node_type,
-    entity_name                      AS node_name,
-    entity_description               AS node_description,
-    entity_creator_email             AS node_creator_email,
-    entity_run_as_email              AS node_run_as_email,
-    is_failed                        AS node_is_failed,
-    last_failed_time                 AS node_last_failed_time,
-    first_failed_time                AS node_first_failed_time,
-    failure_count                    AS node_failure_count,
-    entity_created_time              AS node_created_time,
-    original_job_id                  AS node_job_id,
-    original_pipeline_id             AS node_pipeline_id,
-    CASE WHEN is_failed THEN 'FAILED' ELSE 'HEALTHY' END AS node_status,
-    upper(entity_type)               AS node_label
-  FROM entity_master_complete
+    a.entity_id                        AS node_id,
+    lower(a.entity_type)               AS node_type,
+    a.entity_name                      AS node_name,
+    a.entity_description               AS node_description,
+    a.entity_creator_email             AS node_creator_email,
+    a.entity_run_as_email              AS node_run_as_email,
+    a.is_failed                        AS node_is_failed,
+    a.last_failed_time                 AS node_last_failed_time,
+    a.first_failed_time                AS node_first_failed_time,
+    a.failure_count                    AS node_failure_count,
+    a.last_activity_time               AS node_last_activity_time,
+    a.entity_created_time              AS node_created_time,
+    a.original_job_id                  AS node_job_id,
+    a.original_pipeline_id             AS node_pipeline_id,
+    CASE WHEN a.is_failed THEN 'FAILED' ELSE 'HEALTHY' END AS node_status,
+    upper(a.entity_type)               AS node_label
+  FROM entity_master_complete a
 ),
 dag_edges AS (
   SELECT
-    CONCAT(producer_id, '->', consumer_id) AS edge_id,
-    producer_id      AS source_node_id,
-    lower(producer_type) AS source_node_type,
-    producer_name    AS source_node_name,
-    consumer_id      AS target_node_id,
-    lower(consumer_type) AS target_node_type,
-    consumer_name    AS target_node_name,
-    connecting_table AS edge_table,
-    'DEPENDENCY'     AS edge_label
-  FROM entity_relationships
+    CONCAT(er.producer_id, '->', er.consumer_id) AS edge_id,
+    er.producer_id      AS source_node_id,
+    lower(er.producer_type) AS source_node_type,
+    er.producer_name    AS source_node_name,
+    er.consumer_id      AS target_node_id,
+    lower(er.consumer_type) AS target_node_type,
+    er.consumer_name    AS target_node_name,
+    er.connecting_table AS edge_table,
+    'DEPENDENCY'        AS edge_label
+  FROM entity_relationships er
 )
 
 -- ============================================
--- 10) 최종 출력 (스키마/순서 고정)
+-- 10) Final output (last_activity_time added)
 -- ============================================
 SELECT 
   'NODES' AS result_type,
@@ -339,6 +373,7 @@ SELECT
   node_last_failed_time AS last_failed_time,
   node_first_failed_time AS first_failed_time,
   node_failure_count AS failure_count,
+  node_last_activity_time AS last_activity_time,
   node_created_time AS created_time,
   node_status AS status,
   node_label AS label,
@@ -363,6 +398,7 @@ SELECT
   NULL AS last_failed_time,
   NULL AS first_failed_time,
   NULL AS failure_count,
+  NULL AS last_activity_time,
   NULL AS created_time,
   'ACTIVE' AS status,
   edge_label AS label,
