@@ -132,23 +132,28 @@ warehouse_id:
 ├── databricks.yml
 ├── README.md
 ├── resources
-│   ├── figures
-│   │   ├── jiig_dashboard_table.png
-│   │   ├── jiig_dashboard.png
-│   │   └── jiig_graph.png
-│   ├── jiig.apps.yml
-│   ├── jiig.dashboard.yml
-│   └── jiig.job.yml
+│   ├── figures
+│   │   ├── jiig_dashboard_data.png
+│   │   ├── jiig_dashboard_draft.png
+│   │   ├── jiig_dashboard_parameter.png
+│   │   ├── jiig_dashboard_table.png
+│   │   ├── jiig_dashboard.png
+│   │   ├── jiig_graph.png
+│   │   ├── jiig_obo.png
+│   │   └── jiig_warehouse_id.png
+│   ├── jiig.apps.yml
+│   ├── jiig.dashboard.yml
+│   └── jiig.job.yml
 ├── scratch
-│   └── README.md
+│   └── README.md
 └── src
     ├── apps
-    │   ├── app.py
-    │   ├── app.yaml
-    │   ├── conn.py
-    │   └── requirements.txt
+    │   ├── app.py
+    │   ├── app.yaml
+    │   ├── conn.py
+    │   └── requirements.txt
     ├── dashboard
-    │   └── jiig-dashboard.lvdash.json
+    │   └── jiig-dashboard.lvdash.json
     └── job
         ├── jiig-dag-table-creation.sql
         ├── jiig-dashboard-table-creation.sql
