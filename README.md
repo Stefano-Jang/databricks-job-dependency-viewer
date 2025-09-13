@@ -113,12 +113,18 @@ warehouse_id:
   - name: DATABRICKS_WAREHOUSE_ID
     value: "862f1d757f0424f7"
 ```
-You can find warehouse id in COMPUTE > SQL WAREHOUSE
+- You can find warehouse id in COMPUTE > SQL WAREHOUSE
 ![warehouse_id](resources/figures/jiig_warehouse_id.png)
 
 ### After deploy, modify and re-publish dashboard dataset variable
-- Find dashboard, go to draft mode, change dashboard_table variable to yours
-- Default : CHANGE.ME.PLEASE
+- Find dashboard, go to draft mode 
+![click draft](resources/figures/jiig_dashboard_draft.png)
+
+- Click Data
+![click data](resources/figures/jiig_dashboard_data.png)
+
+- change dashboard_table variable to yours(Default : CHANGE.ME.PLEASE)
+![change parameter](resources/figures/jiig_dashboard_parameter.png)
 
 ### Project Structure
 ```
