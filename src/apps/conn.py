@@ -55,11 +55,8 @@ def query_databricks(query: str) -> pd.DataFrame:
 def load_dag_data():
     """Load DAG data from Databricks with optional time filtering"""
     # Build time filter for errors if provided  
-    error_time_filter = ""
-    
     query = f"""
     SELECT * FROM {DAG_TABLE_NAME}
-    ORDER BY result_type, id
     """
     
     return query_databricks(query)

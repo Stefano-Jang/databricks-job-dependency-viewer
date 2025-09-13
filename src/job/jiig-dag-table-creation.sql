@@ -33,6 +33,7 @@ WITH time_bounds AS (
 
 -- ============================================
 -- 1) Failed job runs (dashboard-aligned)
+--     * Added time window filter on failed_at
 -- ============================================
 fail_runs_job AS (
   SELECT DISTINCT
@@ -44,6 +45,7 @@ fail_runs_job AS (
   WHERE jt.workspace_id = TARGET_WORKSPACE_ID
     AND jt.result_state IN ('FAILED','ERROR','TIMED_OUT')
     AND jt.run_type = 'JOB_RUN'
+    AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.since_ts   -- <-- time filter
 ),
 
 failed_jobs_last AS (
@@ -58,6 +60,7 @@ failed_jobs_last AS (
 
 -- ============================================
 -- 2) Failed pipelines (dashboard-aligned via LDP_ERR_TBL)
+--     * Added time window filter on last_error
 -- ============================================
 failed_pipelines_last AS (
   SELECT
@@ -66,6 +69,8 @@ failed_pipelines_last AS (
     MIN(last_error) AS first_failed_time,
     COUNT(*)        AS failure_count
   FROM identifier(LDP_ERR_TBL)
+  JOIN time_bounds t ON 1=1
+  WHERE last_error >= t.since_ts                                          -- <-- time filter
   GROUP BY pipeline_id
 ),
 
@@ -112,8 +117,7 @@ failed_entity_master AS (
 
 -- ============================================
 -- 4) Recent activity sets (24h window)
---     - JOB: any run activity in window (success/failure both)
---     - PIPELINE: lineage events in window
+--     (unchanged)
 -- ============================================
 recent_job_activity AS (
   SELECT DISTINCT jt.job_id
@@ -124,7 +128,6 @@ recent_job_activity AS (
     AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.since_ts
 ),
 
--- Last activity time for JOBs (any result_state)
 job_last_activity AS (
   SELECT
     jt.job_id,
@@ -140,16 +143,16 @@ job_last_activity AS (
 lineage AS (
   SELECT
     l.event_time,
-    l.entity_type,                         -- 'JOB' or 'PIPELINE'
+    l.entity_type,
     l.entity_id,
     l.source_table_full_name,
     l.target_table_full_name,
     l.source_type,
     l.target_type,
-    l.entity_metadata.job_info.job_id                   AS job_id,
-    l.entity_metadata.job_info.job_run_id               AS job_run_id,
-    l.entity_metadata.dlt_pipeline_info.dlt_pipeline_id AS dlt_pipeline_id,
-    l.entity_metadata.dlt_pipeline_info.dlt_update_id   AS dlt_update_id
+    l.entity_metadata.job_info.job_id,
+    l.entity_metadata.job_info.job_run_id,
+    l.entity_metadata.dlt_pipeline_info.dlt_pipeline_id,
+    l.entity_metadata.dlt_pipeline_info.dlt_update_id
   FROM system.access.table_lineage l
   WHERE l.workspace_id = TARGET_WORKSPACE_ID
     AND l.entity_type IN ('JOB','PIPELINE')
@@ -164,7 +167,6 @@ recent_pipeline_activity AS (
     AND l.event_time >= t.since_ts
 ),
 
--- Last activity time for PIPELINEs (lineage event time)
 pipeline_last_activity AS (
   SELECT
     l.dlt_pipeline_id AS pipeline_id,
@@ -177,7 +179,7 @@ pipeline_last_activity AS (
 ),
 
 -- ============================================
--- 5) Active entity sets
+-- 5) Active entity sets (unchanged)
 -- ============================================
 active_jobs AS (
   SELECT DISTINCT j.job_id AS entity_id
@@ -198,49 +200,45 @@ active_pipelines AS (
       OR p.pipeline_id IN (SELECT pipeline_id FROM recent_pipeline_activity)
     )
 ),
+
+-- ============================================
+-- 6~10) (unchanged) meta join, edges, final select
+-- ============================================
 all_entity_master AS (
-  -- JOB meta
   SELECT
-    'JOB'                         AS entity_type,
-    j.job_id                      AS entity_id,
-    j.name                        AS entity_name,
-    j.description                 AS entity_description,
-    j.creator_id                  AS entity_creator_id,
-    j.run_as                      AS entity_run_as_id,
-    NULL                          AS entity_creator_email,
-    NULL                          AS entity_run_as_email,
-    j.change_time                 AS entity_created_time
+    'JOB' AS entity_type,
+    j.job_id AS entity_id,
+    j.name AS entity_name,
+    j.description AS entity_description,
+    j.creator_id AS entity_creator_id,
+    j.run_as AS entity_run_as_id,
+    NULL AS entity_creator_email,
+    NULL AS entity_run_as_email,
+    j.change_time AS entity_created_time
   FROM system.lakeflow.jobs j
   WHERE j.workspace_id = TARGET_WORKSPACE_ID
     AND array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
     AND j.job_id IN (SELECT entity_id FROM active_jobs)
 
   UNION ALL
-  -- PIPELINE meta
   SELECT
-    'PIPELINE'                    AS entity_type,
-    p.pipeline_id                 AS entity_id,
-    p.name                        AS entity_name,
-    p.pipeline_type               AS entity_description,
-    NULL                          AS entity_creator_id,
-    NULL                          AS entity_run_as_id,
-    p.created_by                  AS entity_creator_email,
-    p.run_as                      AS entity_run_as_email,
-    p.change_time                 AS entity_created_time
+    'PIPELINE',
+    p.pipeline_id,
+    p.name,
+    p.pipeline_type,
+    NULL,
+    NULL,
+    p.created_by,
+    p.run_as,
+    p.change_time
   FROM system.lakeflow.pipelines p
   WHERE p.workspace_id = TARGET_WORKSPACE_ID
     AND p.pipeline_id IN (SELECT entity_id FROM active_pipelines)
 ),
 
--- ============================================
--- 6) Entity target/source tables (for edges)
--- ============================================
 entity_target_tables AS (
   SELECT DISTINCT
-    aem.entity_type,
-    aem.entity_id,
-    aem.entity_name,
-    l.target_table_full_name
+    aem.entity_type, aem.entity_id, aem.entity_name, l.target_table_full_name
   FROM all_entity_master aem
   JOIN lineage l
     ON (
@@ -251,10 +249,7 @@ entity_target_tables AS (
 ),
 entity_source_tables AS (
   SELECT DISTINCT
-    aem.entity_type,
-    aem.entity_id,
-    aem.entity_name,
-    l.source_table_full_name
+    aem.entity_type, aem.entity_id, aem.entity_name, l.source_table_full_name
   FROM all_entity_master aem
   JOIN lineage l
     ON (
@@ -264,9 +259,6 @@ entity_source_tables AS (
   WHERE l.source_table_full_name IS NOT NULL
 ),
 
--- ============================================
--- 7) Inter-entity relationships (edges) via common table, disallow self
--- ============================================
 entity_relationships AS (
   SELECT DISTINCT
     ett.entity_type AS producer_type,
@@ -282,9 +274,6 @@ entity_relationships AS (
   WHERE NOT (ett.entity_type = est.entity_type AND ett.entity_id = est.entity_id)
 ),
 
--- ============================================
--- 8) Join failure status, last activity timestamps, and emails
--- ============================================
 entity_master_complete AS (
   SELECT
     aem.entity_type,
@@ -301,7 +290,6 @@ entity_master_complete AS (
     COALESCE(fj.last_failed_time,  fp.last_failed_time)  AS last_failed_time,
     COALESCE(fj.first_failed_time, fp.first_failed_time) AS first_failed_time,
     COALESCE(fj.failure_count,     fp.failure_count, 0)  AS failure_count,
-    /* last_activity_time: union of job/pipeline activity within 24h window */
     COALESCE(ja.last_activity_time, pa.last_activity_time) AS last_activity_time,
     aem.entity_created_time AS entity_created_time,
     CASE WHEN aem.entity_type='JOB'      THEN aem.entity_id END AS original_job_id,
@@ -321,9 +309,6 @@ entity_master_complete AS (
     ON aem.entity_type='PIPELINE' AND aem.entity_id = pa.pipeline_id
 ),
 
--- ============================================
--- 9) DAG nodes/edges (final schema construction)
--- ============================================
 dag_nodes AS (
   SELECT
     a.entity_id                        AS node_id,
@@ -358,9 +343,6 @@ dag_edges AS (
   FROM entity_relationships er
 )
 
--- ============================================
--- 10) Final output (last_activity_time added)
--- ============================================
 SELECT 
   'NODES' AS result_type,
   node_id AS id,
