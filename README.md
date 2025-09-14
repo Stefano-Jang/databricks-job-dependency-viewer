@@ -178,3 +178,6 @@ warehouse_id:
 
 ### Contribution
 We are waiting your pull requests. Please leave any idea about dashboard and graph.
+
+### Disclaimer
+The main author (stefano-jang) is a Solutions Architect at Databricks. However, this project is not part of any official company work and was initiated solely as a personal good-will effort. It does not come with any guaranteed SLA, nor does it provide official support. If you intend to use this code in your production environment, please review it thoroughly and assume full responsibility for its use.
