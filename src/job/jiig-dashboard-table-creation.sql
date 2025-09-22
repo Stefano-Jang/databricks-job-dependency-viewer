@@ -73,8 +73,8 @@ failed_entity_master AS (
     j.description                 AS failed_description,
     j.creator_id                  AS failed_creator_id,   -- 이메일 매핑 필요
     j.run_as                      AS failed_run_as_id,    -- 이메일 매핑 필요
-    NULL                          AS failed_creator_email,
-    NULL                          AS failed_run_as_email,
+    (select max(email) from identifier(UID_MAP_TBL) where id = j.creator_id) AS failed_creator_email,
+    (select max(email) from identifier(UID_MAP_TBL) where id = j.run_as) AS failed_run_as_email,
     fjl.last_failed_time          AS last_failed_time
   FROM system.lakeflow.jobs j
   JOIN failed_jobs_last fjl ON j.job_id = fjl.job_id
@@ -130,6 +130,8 @@ failed_entity_target_tables AS (
     fem.failed_id,
     fem.failed_name,
     fem.last_failed_time,
+    fem.failed_creator_email,
+    fem.failed_run_as_email,
     l.target_table_full_name AS target_table_full_name
   FROM failed_entity_master fem
   JOIN lineage l
@@ -149,6 +151,8 @@ affected_entities AS (
     fett.failed_id,
     fett.failed_name,
     fett.last_failed_time,
+    fett.failed_creator_email,
+    fett.failed_run_as_email,
     fett.target_table_full_name              AS affected_table,
     l.entity_type                            AS affected_type,  -- 'JOB' or 'PIPELINE'
     COALESCE(l.job_id, l.dlt_pipeline_id)    AS affected_id
@@ -174,6 +178,8 @@ affected_job_details AS (
     ae.failed_id,
     ae.failed_name,
     ae.last_failed_time,
+    ae.failed_creator_email,
+    ae.failed_run_as_email,
     ae.affected_table,
     'JOB'                         AS affected_type,
     ae.affected_id                AS affected_id,
@@ -198,6 +204,8 @@ affected_pipeline_details AS (
     ae.failed_id,
     ae.failed_name,
     ae.last_failed_time,
+    ae.failed_creator_email,
+    ae.failed_run_as_email,
     ae.affected_table,
     'PIPELINE'                    AS affected_type,
     ae.affected_id                AS affected_id,
@@ -222,6 +230,8 @@ affected_entity_details AS (
     ajd.failed_id,
     ajd.failed_name,
     ajd.last_failed_time,
+    ajd.failed_creator_email,
+    ajd.failed_run_as_email,
     ajd.affected_table,
     ajd.affected_type,
     ajd.affected_id,
@@ -249,6 +259,8 @@ SELECT
   lower(aed.failed_type) as failed_type,                 -- (3) 실패 주체 타입 (JOB | PIPELINE)
   MAX(aed.failed_name)            AS failed_name,        -- (2) failed_job_name -> failed_name
   MAX(aed.last_failed_time)       AS last_failed_time,   -- (1) 마지막 실패 시각
+  MAX(aed.failed_creator_email)   AS failed_creator_email,
+  MAX(aed.failed_run_as_email)    AS failed_run_as_email,
   aed.affected_id,
   lower(aed.affected_type) as affected_type,             -- (3) 영향 주체 타입 (JOB | PIPELINE)
   MAX(aed.affected_name)         AS affected_name,
@@ -260,6 +272,8 @@ FROM affected_entity_details aed
 GROUP BY
   aed.failed_id,
   aed.failed_type,
+  aed.failed_creator_email,
+  aed.failed_run_as_email,
   aed.affected_id,
   aed.affected_type
 ORDER BY
@@ -269,4 +283,3 @@ ORDER BY
 )
 select * from BASE
 );
-
