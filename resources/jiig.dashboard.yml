@@ -6,6 +6,10 @@ resources:
       file_path: ../src/dashboard/jiig-dashboard.lvdash.json
       warehouse_id: ${var.warehouse_id}
       embed_credentials: false
+      # Datasets reference tables by bare name; these provide the default
+      # catalog/schema at deploy time — no manual parameter editing needed.
+      dataset_catalog: ${var.jiig_catalog}
+      dataset_schema: ${var.jiig_schema}
   # jobs:
   #   dashboard_snapshot_job:
   #     tags: 

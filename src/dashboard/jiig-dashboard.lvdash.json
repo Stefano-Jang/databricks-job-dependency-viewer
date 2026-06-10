@@ -4,24 +4,7 @@
       "name": "0194d28f",
       "displayName": "Job Run Failure Analysis - Timeline Data",
       "queryLines": [
-        "select * from identifier(:dashboard_table);\n"
-      ],
-      "parameters": [
-        {
-          "displayName": "dashboard_table",
-          "keyword": "dashboard_table",
-          "dataType": "STRING",
-          "defaultSelection": {
-            "values": {
-              "dataType": "STRING",
-              "values": [
-                {
-                  "value": "CHANGE.ME.PLEASE"
-                }
-              ]
-            }
-          }
-        }
+        "SELECT * FROM jiig_dashboard\n"
       ]
     }
   ],

@@ -98,9 +98,9 @@ databricks bundle summary -t prod --profile your-profile-name
   jiig_catalog:   # Tables for dashboard and Graph will be stored under jiig_catalog
     description: Base catalog
     default: shared
-  jiig_schema:
-    description: Base schema
-    default: stefano_jiig
+  jiig_schema:    # Per-target schema isolates dev/prod (created automatically)
+    description: Base schema (per deployment target)
+    default: stefano_jiig_${bundle.target}
   failure_lookback_days:    # Failures within this window are analyzed
     default: 7
   lineage_lookback_days:    # Lineage within this window defines dependency edges
@@ -108,9 +108,9 @@ databricks bundle summary -t prod --profile your-profile-name
   impact_max_depth:         # Max downstream hops for impact analysis
     default: 5
   jiig_dag_table:       # Graph table (nodes + edges for the App)
-    default: ${var.jiig_catalog}.${var.jiig_schema}.dag_relationships_${bundle.target}
+    default: ${var.jiig_catalog}.${var.jiig_schema}.dag_relationships
   dashboard_table:      # Dashboard table (multi-hop failure impact pairs)
-    default: ${var.jiig_catalog}.${var.jiig_schema}.jiig_dashboard_${bundle.target}
+    default: ${var.jiig_catalog}.${var.jiig_schema}.jiig_dashboard
 ```
 
 ### App configuration
@@ -127,15 +127,8 @@ For manual (non-bundle) deployments only, uncomment and set the values in `src/a
 - You can find warehouse id in COMPUTE > SQL WAREHOUSE
 ![warehouse_id](resources/figures/jiig_warehouse_id.png)
 
-### After deploy, modify and re-publish dashboard dataset variable
-- Find dashboard, go to draft mode
-![click draft](resources/figures/jiig_dashboard_draft.png)
-
-- Click Data
-![click data](resources/figures/jiig_dashboard_data.png)
-
-- change dashboard_table variable to yours(Default : CHANGE.ME.PLEASE)
-![change parameter](resources/figures/jiig_dashboard_parameter.png)
+### Dashboard configuration
+No post-deploy manual steps are required. The dashboard dataset references the table by bare name (`jiig_dashboard`), and the bundle injects the catalog/schema at deploy time via the `dataset_catalog` / `dataset_schema` fields in `resources/jiig.dashboard.yml`. Changing `jiig_catalog` / `jiig_schema` bundle variables is enough — see [bundle dashboard resource reference](https://docs.databricks.com/aws/en/dev-tools/bundles/resources). (Requires a recent Databricks CLI; tested with v0.297.)
 
 ### Project Structure
 ```

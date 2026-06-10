@@ -20,8 +20,10 @@ variables:
     description: Base catalog
     default: shared
   jiig_schema:
-    description: Base schema
-    default: stefano_jiig
+    # Per-target schema keeps dev/prod isolated and lets the dashboard reference
+    # tables by bare name (resolved via dataset_catalog/dataset_schema at deploy).
+    description: Base schema (per deployment target)
+    default: stefano_jiig_${bundle.target}
   failure_lookback_days:
     description: Failures within this window (days) are analyzed
     default: 7
@@ -33,10 +35,12 @@ variables:
     default: 5
   jiig_dag_table:
     description: Table for network node and edge information
-    default: ${var.jiig_catalog}.${var.jiig_schema}.dag_relationships_${bundle.target}
+    default: ${var.jiig_catalog}.${var.jiig_schema}.dag_relationships
   dashboard_table:
+    # The bare table name (jiig_dashboard) is hardcoded in the dashboard dataset
+    # query; catalog/schema are injected via dataset_catalog/dataset_schema.
     description: Table for dashboard information
-    default: ${var.jiig_catalog}.${var.jiig_schema}.jiig_dashboard_${bundle.target}
+    default: ${var.jiig_catalog}.${var.jiig_schema}.jiig_dashboard
 
 include:
   - resources/*.yml

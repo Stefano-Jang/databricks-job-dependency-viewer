@@ -16,6 +16,10 @@ DECLARE OR REPLACE FAILURE_LOOKBACK_DAYS INT    DEFAULT CAST({{failure_lookback_
 -- Lineage inside this (longer) window defines the dependency edges
 DECLARE OR REPLACE LINEAGE_LOOKBACK_DAYS INT    DEFAULT CAST({{lineage_lookback_days}} AS INT);
 
+-- Bootstrap the target schema (catalog.schema part of the table name)
+DECLARE OR REPLACE TARGET_SCHEMA STRING DEFAULT regexp_extract(DAG_TBL, '^(.*)\\.[^.]+$', 1);
+CREATE SCHEMA IF NOT EXISTS identifier(TARGET_SCHEMA);
+
 CREATE OR REPLACE TABLE identifier(DAG_TBL) AS (
 WITH time_bounds AS (
   SELECT
