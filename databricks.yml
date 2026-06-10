@@ -15,29 +15,22 @@ variables:
     default: 1444828305810485
   account_name:
     description: Customer Name
-    default: MyCompany 
+    default: MyCompany
   jiig_catalog:
     description: Base catalog
     default: shared
   jiig_schema:
     description: Base schema
     default: stefano_jiig
-  user_id_map_table_name:
-    description: Target table name of user ID and email mapping job
-    default: ${var.jiig_catalog}.${var.jiig_schema}.user_id_map_${bundle.target}
-  ldp_error_table:
-    description: Target table name of LDP update error detection job
-    type: complex
-    default:
-      # Only process last N days (None for all data)
-      days_back: 30
-      # Find LDP errors from source_catalogs (delimiter: comma, all: all)
-      #source_catalogs: all
-      source_catalogs: shared,stefano-test-catalog
-      # Save Error detection results to output_catalog.output_schema.dlt_error_analysis
-      output_catalog: ${var.jiig_catalog}
-      output_schema: ${var.jiig_schema}
-      full_name: ${var.ldp_error_table.output_catalog}.${var.ldp_error_table.output_schema}.dlt_error_analysis
+  failure_lookback_days:
+    description: Failures within this window (days) are analyzed
+    default: 7
+  lineage_lookback_days:
+    description: Table lineage within this window (days) defines dependency edges
+    default: 30
+  impact_max_depth:
+    description: Maximum number of downstream hops to follow for impact analysis
+    default: 5
   jiig_dag_table:
     description: Table for network node and edge information
     default: ${var.jiig_catalog}.${var.jiig_schema}.dag_relationships_${bundle.target}

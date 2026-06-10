@@ -5,3 +5,14 @@ resources:
       description: 'Job and Pipeline dependency graph'
       source_code_path: ../src/apps
       user_api_scopes: ['sql', 'catalog.tables:read', 'catalog.schemas:read', 'catalog.catalogs:read']
+      config:
+        command: ['streamlit', 'run', 'app.py']
+        env:
+          - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+            value: 'false'
+          - name: DAG_TABLE_NAME
+            value: ${var.jiig_dag_table}
+          - name: DATABRICKS_WAREHOUSE_ID
+            value: ${var.warehouse_id}
+          - name: FAILURE_LOOKBACK_DAYS
+            value: ${var.failure_lookback_days}

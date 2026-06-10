@@ -96,12 +96,11 @@
             "multilineTextboxSpec": {
               "lines": [
                 "# Job & Pipeline Failed List\n",
-                "- Impact analysis is performed on tables that previously had correlations in system.access.table_lineage.\n",
-                "- Targets job_run entries from system.lakeflow.job_run_timeline with states ERROR, FAILED, or TIMED_OUT.\n",
-                "- For this dashboard to display correctly, the following two additional tables are required:\n",
-                "  - A table mapping user IDs to emails\n",
-                "  - A table recording errors that occurred during pipeline updates\n",
-                "- Depending on the collection interval of the pipeline failure collection job, pipeline failures may be delayed."
+                "- Impact analysis follows table lineage from system.access.table_lineage and job→pipeline trigger links, up to N downstream hops (hop_distance, impact_path columns).\n",
+                "- Job failures: system.lakeflow.job_run_timeline with states ERROR, FAILED, or TIMED_OUT.\n",
+                "- Pipeline (Lakeflow Spark Declarative Pipelines) failures: system.lakeflow.pipeline_update_timeline with result_state FAILED on REFRESH / FULL_REFRESH updates.\n",
+                "- Owner emails come directly from the system tables (creator_user_name / run_as_user_name); rows older than Dec 2025 may show numeric IDs instead.\n",
+                "- No auxiliary tables are required — everything is computed from native system tables by the JIIG job.\n"
               ]
             }
           },
@@ -494,6 +493,14 @@
                     {
                       "name": "affected_descriptions",
                       "expression": "`affected_descriptions`"
+                    },
+                    {
+                      "name": "hop_distance",
+                      "expression": "`hop_distance`"
+                    },
+                    {
+                      "name": "impact_path",
+                      "expression": "`impact_path`"
                     }
                   ],
                   "disaggregated": true
@@ -543,7 +550,7 @@
                     "imageTitleTemplate": "{{ @ }}",
                     "imageWidth": "",
                     "imageHeight": "",
-                    "linkUrlTemplate": "{{failed_type}}s/{{failed_id}}",
+                    "linkUrlTemplate": "/{{failed_type}}s/{{failed_id}}",
                     "linkTextTemplate": "{{ @ }}",
                     "linkTitleTemplate": "{{ @ }}",
                     "linkOpenInNewTab": true,
@@ -630,7 +637,7 @@
                     "imageTitleTemplate": "{{ @ }}",
                     "imageWidth": "",
                     "imageHeight": "",
-                    "linkUrlTemplate": "{{affected_type}}s/{{affected_id}}",
+                    "linkUrlTemplate": "/{{affected_type}}s/{{affected_id}}",
                     "linkTextTemplate": "{{ @ }}",
                     "linkTitleTemplate": "{{ @ }}",
                     "linkOpenInNewTab": true,
@@ -664,7 +671,7 @@
                     "type": "string",
                     "displayAs": "string",
                     "visible": true,
-                    "order": 5,
+                    "order": 6,
                     "title": "affected_type",
                     "allowSearch": false,
                     "alignContent": "left",
@@ -691,7 +698,7 @@
                     "type": "string",
                     "displayAs": "string",
                     "visible": true,
-                    "order": 6,
+                    "order": 7,
                     "title": "affected_name",
                     "allowSearch": false,
                     "alignContent": "left",
@@ -718,7 +725,7 @@
                     "type": "string",
                     "displayAs": "string",
                     "visible": true,
-                    "order": 7,
+                    "order": 8,
                     "title": "affected_creator_email",
                     "allowSearch": false,
                     "alignContent": "left",
@@ -745,7 +752,7 @@
                     "type": "string",
                     "displayAs": "string",
                     "visible": true,
-                    "order": 8,
+                    "order": 9,
                     "title": "affected_run_as_email",
                     "allowSearch": false,
                     "alignContent": "left",
@@ -772,7 +779,7 @@
                     "type": "string",
                     "displayAs": "string",
                     "visible": true,
-                    "order": 9,
+                    "order": 10,
                     "title": "affected_tables",
                     "allowSearch": true,
                     "alignContent": "left",
@@ -799,7 +806,7 @@
                     "type": "string",
                     "displayAs": "string",
                     "visible": true,
-                    "order": 10,
+                    "order": 11,
                     "title": "affected_descriptions",
                     "allowSearch": false,
                     "alignContent": "left",
@@ -808,6 +815,60 @@
                     "useMonospaceFont": false,
                     "preserveWhitespace": false,
                     "displayName": "affected_descriptions"
+                  },
+                  {
+                    "fieldName": "hop_distance",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "integer",
+                    "displayAs": "number",
+                    "visible": true,
+                    "order": 5,
+                    "title": "hop_distance",
+                    "allowSearch": false,
+                    "alignContent": "right",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "hop_distance"
+                  },
+                  {
+                    "fieldName": "impact_path",
+                    "booleanValues": [
+                      "false",
+                      "true"
+                    ],
+                    "imageUrlTemplate": "{{ @ }}",
+                    "imageTitleTemplate": "{{ @ }}",
+                    "imageWidth": "",
+                    "imageHeight": "",
+                    "linkUrlTemplate": "{{ @ }}",
+                    "linkTextTemplate": "{{ @ }}",
+                    "linkTitleTemplate": "{{ @ }}",
+                    "linkOpenInNewTab": true,
+                    "type": "string",
+                    "displayAs": "string",
+                    "visible": true,
+                    "order": 99,
+                    "title": "impact_path",
+                    "allowSearch": false,
+                    "alignContent": "left",
+                    "allowHTML": false,
+                    "highlightLinks": false,
+                    "useMonospaceFont": false,
+                    "preserveWhitespace": false,
+                    "displayName": "impact_path"
                   }
                 ]
               },

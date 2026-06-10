@@ -1,62 +1,88 @@
 import os
+
 import pandas as pd
 import streamlit as st
 from databricks import sql
 from databricks.sdk.core import Config
 
-assert os.getenv('DATABRICKS_WAREHOUSE_ID'), "DATABRICKS_WAREHOUSE_ID must be set in app.yaml or environment."
-assert os.getenv('DAG_TABLE_NAME'), "DAG_TABLE_NAME must be set in app.yaml or environment."
-DAG_TABLE_NAME = os.getenv('DAG_TABLE_NAME')
+assert os.getenv("DATABRICKS_WAREHOUSE_ID"), "DATABRICKS_WAREHOUSE_ID must be set in app.yaml or environment."
+assert os.getenv("DAG_TABLE_NAME"), "DAG_TABLE_NAME must be set in app.yaml or environment."
 
-user_token = st.context.headers.get('X-Forwarded-Access-Token')
+DAG_TABLE_NAME = os.getenv("DAG_TABLE_NAME")
+WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
+
+NODE_COLUMNS = [
+    "id", "type", "name", "description", "creator_email", "run_as_email",
+    "is_failed", "last_failed_time", "first_failed_time", "failure_count",
+    "failure_detail", "last_activity_time", "created_time", "status",
+]
+EDGE_COLUMNS = ["id", "type", "source_id", "target_id", "connecting_tables", "edge_table_count"]
+
+
+def _user_token():
+    """On-behalf-of-user token forwarded by Databricks Apps, if present."""
+    try:
+        return st.context.headers.get("X-Forwarded-Access-Token")
+    except Exception:
+        return None
+
+
+def current_user_key() -> str:
+    """Identity used to partition the data cache per user (OBO isolation)."""
+    try:
+        return (st.context.headers.get("X-Forwarded-Email")
+                or st.context.headers.get("X-Forwarded-User")
+                or "local")
+    except Exception:
+        return "local"
+
+
+def _connect():
+    cfg = Config()
+    http_path = f"/sql/1.0/warehouses/{WAREHOUSE_ID}"
+    token = _user_token()
+    if token:
+        return sql.connect(server_hostname=cfg.host, http_path=http_path, access_token=token)
+    # Fallback: app service principal or local default auth (development)
+    return sql.connect(server_hostname=cfg.host, http_path=http_path,
+                       credentials_provider=lambda: cfg.authenticate)
+
 
 def query_databricks(query: str) -> pd.DataFrame:
     try:
-        cfg = Config()  # Auto-pulls environment variables for auth
-        with sql.connect( 
-            server_hostname=cfg.host,
-            http_path=f"/sql/1.0/warehouses/{cfg.warehouse_id}",
-            access_token=user_token,
-        ) as connection:
+        with _connect() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(query)
-                df = cursor.fetchall_arrow().to_pandas()
-                
-                # Convert datetime columns to strings to avoid JSON serialization issues
-                datetime_cols_converted = []
-                for col in df.columns:
-                    if df[col].dtype == 'datetime64[ns]' or pd.api.types.is_datetime64_any_dtype(df[col]):
-                        # Handle NaT (Not a Time) values by converting to empty string
-                        df[col] = df[col].dt.strftime('%Y-%m-%d %H:%M:%S').fillna('')
-                        datetime_cols_converted.append(col)
-                    elif df[col].dtype == 'object':
-                        # Handle any remaining timestamp objects that might be in object columns
-                        has_timestamps = df[col].apply(lambda x: pd.notnull(x) and hasattr(x, 'strftime')).any()
-                        if has_timestamps:
-                            df[col] = df[col].apply(lambda x: x.strftime('%Y-%m-%d %H:%M:%S') if pd.notnull(x) and hasattr(x, 'strftime') else str(x) if pd.notnull(x) else '')
-                            datetime_cols_converted.append(col)
-                
-                # Ensure boolean columns are proper Python bool (not numpy.bool_)
-                for col in df.columns:
-                    if df[col].dtype == 'bool':
-                        df[col] = df[col].astype(bool)
-                
-                # Debug info for troubleshooting
-                if datetime_cols_converted:
-                    print(f"Converted datetime columns to strings: {datetime_cols_converted}")
-                
-                return df
-                
+                return cursor.fetchall_arrow().to_pandas()
     except Exception as e:
-        # Re-raise with more context
-        raise Exception(f"Databricks query failed: {str(e)}. Check warehouse ID and table existence.")
+        raise Exception(
+            f"Databricks query failed: {e}. Check warehouse ID, table existence and permissions."
+        )
+
 
 @st.cache_data(ttl=300)
-def load_dag_data():
-    """Load DAG data from Databricks with optional time filtering"""
-    # Build time filter for errors if provided  
-    query = f"""
-    SELECT * FROM {DAG_TABLE_NAME}
+def load_graph(user_key: str):
+    """Load the DAG table once per user and split into (nodes_df, edges_df).
+
+    user_key keeps the cache per-user: queries run with the requesting user's
+    on-behalf-of token, so results must never be shared across users.
     """
-    
-    return query_databricks(query)
+    df = query_databricks(f"""
+        SELECT result_type, id, type, name, description, creator_email, run_as_email,
+               is_failed, last_failed_time, first_failed_time, failure_count,
+               failure_detail, last_activity_time, created_time, status,
+               source_id, target_id, connecting_tables, edge_table_count
+        FROM {DAG_TABLE_NAME}
+    """)
+    nodes_df = df[df["result_type"] == "NODES"][NODE_COLUMNS].copy()
+    edges_df = df[df["result_type"] == "EDGES"][EDGE_COLUMNS].copy()
+
+    nodes_df["id"] = nodes_df["id"].astype(str)
+    nodes_df["is_failed"] = nodes_df["is_failed"].astype("boolean").fillna(False).astype(bool)
+    for col in ("last_failed_time", "first_failed_time", "last_activity_time", "created_time"):
+        nodes_df[col] = pd.to_datetime(nodes_df[col], utc=True, errors="coerce")
+    nodes_df["failure_count"] = pd.to_numeric(nodes_df["failure_count"], errors="coerce").fillna(0).astype(int)
+
+    edges_df["source_id"] = edges_df["source_id"].astype(str)
+    edges_df["target_id"] = edges_df["target_id"].astype(str)
+    return nodes_df, edges_df

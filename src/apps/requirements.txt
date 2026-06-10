@@ -1,1 +1,5 @@
+streamlit>=1.38
 st-link-analysis
+databricks-sql-connector
+databricks-sdk
+pandas

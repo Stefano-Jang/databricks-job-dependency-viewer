@@ -1,395 +1,323 @@
--- =========================
--- Create and Refresh DAG Relationships Table (Aligned with Dashboard Logic)
--- =========================
-DECLARE OR REPLACE UID_MAP_TBL STRING DEFAULT {{user_id_map_table_name}};
-DECLARE OR REPLACE LDP_ERR_TBL STRING DEFAULT {{ldp_error_table_full_name}};
-DECLARE OR REPLACE TARGET_WORKSPACE_ID STRING DEFAULT {{workspace_id}};
-DECLARE OR REPLACE DAG_TBL STRING DEFAULT {{jiig_dag_table}};
-
--- Activity inclusion window (default: last 24 hours)
-DECLARE OR REPLACE RECENT_WINDOW_HOURS INTERVAL DAY DEFAULT INTERVAL 1 DAY;
-
-CREATE TABLE IF NOT EXISTS identifier(LDP_ERR_TBL)(
-  pipeline_name STRING,
-  pipeline_id STRING,
-  event_type STRING,
-  error_count BIGINT,
-  affected_runs BIGINT,
-  first_error TIMESTAMP,
-  last_error TIMESTAMP,
-  sample_error_messages ARRAY<STRING>,
-  sample_message STRING
-);
+-- =====================================================================
+-- Create and Refresh DAG Relationships Table (nodes & edges for the app)
+--
+-- Sources (all native system tables, no auxiliary jobs required):
+--   * system.lakeflow.jobs / pipelines              -- SCD2, latest row used
+--   * system.lakeflow.job_run_timeline              -- job failure / activity
+--   * system.lakeflow.pipeline_update_timeline      -- pipeline (SDP) update
+--                                                      failure / activity
+--   * system.access.table_lineage                   -- table-level edges,
+--                                                      entity_metadata based
+-- =====================================================================
+DECLARE OR REPLACE TARGET_WORKSPACE_ID   STRING DEFAULT {{workspace_id}};
+DECLARE OR REPLACE DAG_TBL               STRING DEFAULT {{jiig_dag_table}};
+-- Failures/activity inside this window mark a node FAILED / recently active
+DECLARE OR REPLACE FAILURE_LOOKBACK_DAYS INT    DEFAULT CAST({{failure_lookback_days}} AS INT);
+-- Lineage inside this (longer) window defines the dependency edges
+DECLARE OR REPLACE LINEAGE_LOOKBACK_DAYS INT    DEFAULT CAST({{lineage_lookback_days}} AS INT);
 
 CREATE OR REPLACE TABLE identifier(DAG_TBL) AS (
--- ============================================
--- 0) Time bounds
--- ============================================
 WITH time_bounds AS (
   SELECT
-    CURRENT_TIMESTAMP()                           AS now_ts,
-    CURRENT_TIMESTAMP() - RECENT_WINDOW_HOURS     AS since_ts
+    timestampadd(DAY, -FAILURE_LOOKBACK_DAYS, current_timestamp()) AS failure_since_ts,
+    timestampadd(DAY, -LINEAGE_LOOKBACK_DAYS, current_timestamp()) AS lineage_since_ts,
+    date_sub(current_date(), LINEAGE_LOOKBACK_DAYS)                AS lineage_since_date
 ),
 
 -- ============================================
--- 1) Failed job runs (dashboard-aligned)
---     * Added time window filter on failed_at
+-- 1) Latest (SCD2) entity metadata
 -- ============================================
-fail_runs_job AS (
-  SELECT DISTINCT
+-- Latest row regardless of deletion: failed entities stay visible even when
+-- they were deleted after the failure (forensics); other nodes must be alive.
+jobs_latest AS (
+  SELECT * FROM (
+    SELECT
+      job_id, name, description, creator_id, creator_user_name,
+      run_as, run_as_user_name, tags, delete_time, create_time, change_time
+    FROM system.lakeflow.jobs
+    WHERE workspace_id = TARGET_WORKSPACE_ID
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, job_id ORDER BY change_time DESC) = 1
+  )
+  WHERE COALESCE(NOT array_contains(map_keys(tags), 'LakehouseMonitoringAnomalyDetection'), true)
+),
+
+pipelines_latest AS (
+  SELECT * FROM (
+    SELECT
+      pipeline_id, name, pipeline_type, created_by, run_as,
+      delete_time, create_time, change_time
+    FROM system.lakeflow.pipelines
+    WHERE workspace_id = TARGET_WORKSPACE_ID
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY workspace_id, pipeline_id ORDER BY change_time DESC) = 1
+  )
+),
+
+-- ============================================
+-- 2) Failures within the window
+--    Jobs: job_run_timeline terminal rows
+--    Pipelines (SDP): pipeline_update_timeline terminal FAILED updates
+-- ============================================
+failed_jobs AS (
+  SELECT
     jt.job_id,
-    jt.run_id,
-    COALESCE(jt.period_end_time, jt.period_start_time) AS failed_at
+    MAX(COALESCE(jt.period_end_time, jt.period_start_time)) AS last_failed_time,
+    MIN(COALESCE(jt.period_end_time, jt.period_start_time)) AS first_failed_time,
+    COUNT(*)                                                AS failure_count,
+    max_by(jt.termination_code, COALESCE(jt.period_end_time, jt.period_start_time)) AS failure_detail
   FROM system.lakeflow.job_run_timeline jt
-  JOIN time_bounds t ON 1=1
-  WHERE jt.workspace_id = TARGET_WORKSPACE_ID
-    AND jt.result_state IN ('FAILED','ERROR','TIMED_OUT')
-    AND jt.run_type = 'JOB_RUN'
-    AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.since_ts   -- <-- time filter
-),
-
-failed_jobs_last AS (
-  SELECT
-    job_id,
-    MAX(failed_at) AS last_failed_time,
-    MIN(failed_at) AS first_failed_time,
-    COUNT(*)       AS failure_count
-  FROM fail_runs_job
-  GROUP BY job_id
-),
-
--- ============================================
--- 2) Failed pipelines (dashboard-aligned via LDP_ERR_TBL)
---     * Added time window filter on last_error
--- ============================================
-failed_pipelines_last AS (
-  SELECT
-    pipeline_id,
-    MAX(last_error) AS last_failed_time,
-    MIN(last_error) AS first_failed_time,
-    COUNT(*)        AS failure_count
-  FROM identifier(LDP_ERR_TBL)
-  JOIN time_bounds t ON 1=1
-  WHERE last_error >= t.since_ts                                          -- <-- time filter
-  GROUP BY pipeline_id
-),
-
--- ============================================
--- 3) Failed entity master (JOB + PIPELINE)
--- ============================================
-failed_entity_master AS (
-  -- JOB
-  SELECT
-    'JOB'        AS failed_type,
-    j.job_id     AS failed_id,
-    j.name       AS failed_name,
-    j.description AS failed_description,
-    j.creator_id AS failed_creator_id,
-    j.run_as     AS failed_run_as_id,
-    NULL         AS failed_creator_email,
-    NULL         AS failed_run_as_email,
-    fj.last_failed_time,
-    fj.first_failed_time,
-    fj.failure_count
-  FROM system.lakeflow.jobs j
-  JOIN failed_jobs_last fj ON j.job_id = fj.job_id
-  WHERE j.workspace_id = TARGET_WORKSPACE_ID
-    AND array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
-
-  UNION ALL
-  -- PIPELINE
-  SELECT
-    'PIPELINE'    AS failed_type,
-    p.pipeline_id AS failed_id,
-    p.name        AS failed_name,
-    p.pipeline_type AS failed_description,
-    NULL          AS failed_creator_id,
-    NULL          AS failed_run_as_id,
-    p.created_by  AS failed_creator_email,
-    p.run_as      AS failed_run_as_email,
-    fp.last_failed_time,
-    fp.first_failed_time,
-    fp.failure_count
-  FROM system.lakeflow.pipelines p
-  JOIN failed_pipelines_last fp ON p.pipeline_id = fp.pipeline_id
-  WHERE p.workspace_id = TARGET_WORKSPACE_ID
-),
-
--- ============================================
--- 4) Recent activity sets (24h window)
---     (unchanged)
--- ============================================
-recent_job_activity AS (
-  SELECT DISTINCT jt.job_id
-  FROM system.lakeflow.job_run_timeline jt
-  JOIN time_bounds t ON 1=1
+  CROSS JOIN time_bounds t
   WHERE jt.workspace_id = TARGET_WORKSPACE_ID
     AND jt.run_type = 'JOB_RUN'
-    AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.since_ts
+    AND jt.result_state IN ('FAILED', 'ERROR', 'TIMED_OUT')
+    AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.failure_since_ts
+  GROUP BY jt.job_id
 ),
 
-job_last_activity AS (
+failed_pipelines AS (
+  SELECT
+    put.pipeline_id,
+    MAX(COALESCE(put.period_end_time, put.period_start_time)) AS last_failed_time,
+    MIN(COALESCE(put.period_end_time, put.period_start_time)) AS first_failed_time,
+    COUNT(*)                                                  AS failure_count,
+    max_by(CONCAT('update_type=', put.update_type, ', update_id=', put.update_id),
+           COALESCE(put.period_end_time, put.period_start_time)) AS failure_detail
+  FROM system.lakeflow.pipeline_update_timeline put
+  CROSS JOIN time_bounds t
+  WHERE put.workspace_id = TARGET_WORKSPACE_ID
+    AND put.result_state = 'FAILED'
+    AND put.update_type IN ('REFRESH', 'FULL_REFRESH')
+    AND COALESCE(put.period_end_time, put.period_start_time) >= t.failure_since_ts
+  GROUP BY put.pipeline_id
+),
+
+-- ============================================
+-- 3) Recent activity within the window
+-- ============================================
+job_activity AS (
   SELECT
     jt.job_id,
     MAX(COALESCE(jt.period_end_time, jt.period_start_time)) AS last_activity_time
   FROM system.lakeflow.job_run_timeline jt
-  JOIN time_bounds t ON 1=1
+  CROSS JOIN time_bounds t
   WHERE jt.workspace_id = TARGET_WORKSPACE_ID
     AND jt.run_type = 'JOB_RUN'
-    AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.since_ts
+    AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.failure_since_ts
   GROUP BY jt.job_id
 ),
 
+pipeline_activity AS (
+  SELECT
+    put.pipeline_id,
+    MAX(COALESCE(put.period_end_time, put.period_start_time)) AS last_activity_time
+  FROM system.lakeflow.pipeline_update_timeline put
+  CROSS JOIN time_bounds t
+  WHERE put.workspace_id = TARGET_WORKSPACE_ID
+    AND COALESCE(put.period_end_time, put.period_start_time) >= t.failure_since_ts
+  GROUP BY put.pipeline_id
+),
+
+-- ============================================
+-- 4) Lineage (entity_metadata based) and edges
+-- ============================================
 lineage AS (
   SELECT
-    l.event_time,
-    l.entity_type,
-    l.entity_id,
+    CASE WHEN l.entity_metadata.job_info.job_id IS NOT NULL THEN 'JOB' ELSE 'PIPELINE' END AS entity_kind,
+    COALESCE(l.entity_metadata.job_info.job_id,
+             l.entity_metadata.dlt_pipeline_info.dlt_pipeline_id) AS entity_key,
     l.source_table_full_name,
-    l.target_table_full_name,
-    l.source_type,
-    l.target_type,
-    l.entity_metadata.job_info.job_id,
-    l.entity_metadata.job_info.job_run_id,
-    l.entity_metadata.dlt_pipeline_info.dlt_pipeline_id,
-    l.entity_metadata.dlt_pipeline_info.dlt_update_id
+    l.target_table_full_name
   FROM system.access.table_lineage l
+  CROSS JOIN time_bounds t
   WHERE l.workspace_id = TARGET_WORKSPACE_ID
-    AND l.entity_type IN ('JOB','PIPELINE')
+    AND l.event_date >= t.lineage_since_date
+    AND (l.entity_metadata.job_info.job_id IS NOT NULL
+         OR l.entity_metadata.dlt_pipeline_info.dlt_pipeline_id IS NOT NULL)
 ),
 
-recent_pipeline_activity AS (
+entity_writes AS (
+  SELECT DISTINCT entity_kind, entity_key, target_table_full_name AS table_full_name
+  FROM lineage
+  WHERE target_table_full_name IS NOT NULL
+),
+
+entity_reads AS (
+  SELECT DISTINCT entity_kind, entity_key, source_table_full_name AS table_full_name
+  FROM lineage
+  WHERE source_table_full_name IS NOT NULL
+),
+
+-- Table dependency: producer writes a table the consumer reads.
+-- One row per (producer, consumer) pair with the connecting tables aggregated.
+table_edges AS (
+  SELECT
+    w.entity_kind AS producer_kind,
+    w.entity_key  AS producer_key,
+    r.entity_kind AS consumer_kind,
+    r.entity_key  AS consumer_key,
+    concat_ws(', ', sort_array(collect_set(w.table_full_name))) AS edge_tables,
+    COUNT(DISTINCT w.table_full_name)                           AS edge_table_count
+  FROM entity_writes w
+  JOIN entity_reads r
+    ON w.table_full_name = r.table_full_name
+  WHERE NOT (w.entity_kind = r.entity_kind AND w.entity_key = r.entity_key)
+  GROUP BY 1, 2, 3, 4
+),
+
+-- Orchestration dependency: a job task triggered the pipeline update.
+trigger_edges AS (
   SELECT DISTINCT
-    l.dlt_pipeline_id AS pipeline_id
-  FROM lineage l
-  JOIN time_bounds t ON 1=1
-  WHERE l.entity_type = 'PIPELINE'
-    AND l.event_time >= t.since_ts
+    'JOB'      AS producer_kind,
+    put.trigger_details.job_task.job_id AS producer_key,
+    'PIPELINE' AS consumer_kind,
+    put.pipeline_id AS consumer_key
+  FROM system.lakeflow.pipeline_update_timeline put
+  CROSS JOIN time_bounds t
+  WHERE put.workspace_id = TARGET_WORKSPACE_ID
+    AND put.trigger_details.job_task.job_id IS NOT NULL
+    AND COALESCE(put.period_end_time, put.period_start_time) >= t.lineage_since_ts
 ),
 
-pipeline_last_activity AS (
-  SELECT
-    l.dlt_pipeline_id AS pipeline_id,
-    MAX(l.event_time) AS last_activity_time
-  FROM lineage l
-  JOIN time_bounds t ON 1=1
-  WHERE l.entity_type = 'PIPELINE'
-    AND l.event_time >= t.since_ts
-  GROUP BY l.dlt_pipeline_id
-),
-
--- ============================================
--- 5) Active entity sets (unchanged)
--- ============================================
-active_jobs AS (
-  SELECT DISTINCT j.job_id AS entity_id
-  FROM system.lakeflow.jobs j
-  WHERE j.workspace_id = TARGET_WORKSPACE_ID
-    AND array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
-    AND (
-      j.job_id IN (SELECT job_id FROM failed_jobs_last)
-      OR j.job_id IN (SELECT job_id FROM recent_job_activity)
-    )
-),
-active_pipelines AS (
-  SELECT DISTINCT p.pipeline_id AS entity_id
-  FROM system.lakeflow.pipelines p
-  WHERE p.workspace_id = TARGET_WORKSPACE_ID
-    AND (
-      p.pipeline_id IN (SELECT pipeline_id FROM failed_pipelines_last)
-      OR p.pipeline_id IN (SELECT pipeline_id FROM recent_pipeline_activity)
-    )
-),
-
--- ============================================
--- 6~10) (unchanged) meta join, edges, final select
--- ============================================
-all_entity_master AS (
-  SELECT
-    'JOB' AS entity_type,
-    j.job_id AS entity_id,
-    j.name AS entity_name,
-    j.description AS entity_description,
-    j.creator_id AS entity_creator_id,
-    j.run_as AS entity_run_as_id,
-    NULL AS entity_creator_email,
-    NULL AS entity_run_as_email,
-    j.change_time AS entity_created_time
-  FROM system.lakeflow.jobs j
-  WHERE j.workspace_id = TARGET_WORKSPACE_ID
-    AND array_contains(map_keys(j.tags), 'LakehouseMonitoringAnomalyDetection') = false
-    AND j.job_id IN (SELECT entity_id FROM active_jobs)
-
+all_edges AS (
+  SELECT producer_kind, producer_key, consumer_kind, consumer_key,
+         edge_tables, edge_table_count, 'DEPENDENCY' AS edge_kind
+  FROM table_edges
   UNION ALL
-  SELECT
-    'PIPELINE',
-    p.pipeline_id,
-    p.name,
-    p.pipeline_type,
-    NULL,
-    NULL,
-    p.created_by,
-    p.run_as,
-    p.change_time
-  FROM system.lakeflow.pipelines p
-  WHERE p.workspace_id = TARGET_WORKSPACE_ID
-    AND p.pipeline_id IN (SELECT entity_id FROM active_pipelines)
+  SELECT producer_kind, producer_key, consumer_kind, consumer_key,
+         CAST(NULL AS STRING), 0, 'TRIGGER'
+  FROM trigger_edges
 ),
 
-entity_target_tables AS (
-  SELECT DISTINCT
-    aem.entity_type, aem.entity_id, aem.entity_name, l.target_table_full_name
-  FROM all_entity_master aem
-  JOIN lineage l
-    ON (
-         (aem.entity_type = 'JOB'      AND l.entity_type = 'JOB'      AND l.job_id          = aem.entity_id)
-      OR (aem.entity_type = 'PIPELINE' AND l.entity_type = 'PIPELINE' AND l.dlt_pipeline_id = aem.entity_id)
-       )
-  WHERE l.target_table_full_name IS NOT NULL
-),
-entity_source_tables AS (
-  SELECT DISTINCT
-    aem.entity_type, aem.entity_id, aem.entity_name, l.source_table_full_name
-  FROM all_entity_master aem
-  JOIN lineage l
-    ON (
-         (aem.entity_type = 'JOB'      AND l.entity_type = 'JOB'      AND l.job_id          = aem.entity_id)
-      OR (aem.entity_type = 'PIPELINE' AND l.entity_type = 'PIPELINE' AND l.dlt_pipeline_id = aem.entity_id)
-       )
-  WHERE l.source_table_full_name IS NOT NULL
+-- ============================================
+-- 5) Node universe: failed, recently active, or connected by an edge
+-- ============================================
+candidate_entities AS (
+  SELECT 'JOB' AS entity_kind, job_id AS entity_key FROM failed_jobs
+  UNION
+  SELECT 'JOB', job_id FROM job_activity
+  UNION
+  SELECT 'PIPELINE', pipeline_id FROM failed_pipelines
+  UNION
+  SELECT 'PIPELINE', pipeline_id FROM pipeline_activity
+  UNION
+  SELECT producer_kind, producer_key FROM all_edges
+  UNION
+  SELECT consumer_kind, consumer_key FROM all_edges
 ),
 
-entity_relationships AS (
-  SELECT DISTINCT
-    ett.entity_type AS producer_type,
-    ett.entity_id   AS producer_id,
-    ett.entity_name AS producer_name,
-    est.entity_type AS consumer_type,
-    est.entity_id   AS consumer_id,
-    est.entity_name AS consumer_name,
-    ett.target_table_full_name AS connecting_table
-  FROM entity_target_tables ett
-  JOIN entity_source_tables est
-    ON ett.target_table_full_name = est.source_table_full_name
-  WHERE NOT (ett.entity_type = est.entity_type AND ett.entity_id = est.entity_id)
+job_nodes AS (
+  SELECT
+    c.entity_key                                   AS node_id,
+    'job'                                          AS node_type,
+    CONCAT(j.name, CASE WHEN j.delete_time IS NOT NULL THEN ' [DELETED]' ELSE '' END) AS node_name,
+    j.description                                  AS node_description,
+    COALESCE(j.creator_user_name, j.creator_id)    AS node_creator_email,
+    COALESCE(j.run_as_user_name, j.run_as)         AS node_run_as_email,
+    fj.job_id IS NOT NULL                          AS node_is_failed,
+    fj.last_failed_time                            AS node_last_failed_time,
+    fj.first_failed_time                           AS node_first_failed_time,
+    COALESCE(fj.failure_count, 0)                  AS node_failure_count,
+    fj.failure_detail                              AS node_failure_detail,
+    ja.last_activity_time                          AS node_last_activity_time,
+    COALESCE(j.create_time, j.change_time)         AS node_created_time
+  FROM candidate_entities c
+  JOIN jobs_latest j
+    ON c.entity_kind = 'JOB' AND c.entity_key = j.job_id
+  LEFT JOIN failed_jobs fj  ON fj.job_id = j.job_id
+  LEFT JOIN job_activity ja ON ja.job_id = j.job_id
+  WHERE j.delete_time IS NULL OR fj.job_id IS NOT NULL
 ),
 
-entity_master_complete AS (
+pipeline_nodes AS (
   SELECT
-    aem.entity_type,
-    aem.entity_id,
-    aem.entity_name,
-    aem.entity_description,
-    COALESCE(idmap_creator.email, aem.entity_creator_email) AS entity_creator_email,
-    COALESCE(idmap_runas.email,   aem.entity_run_as_email)  AS entity_run_as_email,
-    CASE
-      WHEN aem.entity_type = 'JOB'      AND fj.job_id      IS NOT NULL THEN true
-      WHEN aem.entity_type = 'PIPELINE' AND fp.pipeline_id IS NOT NULL THEN true
-      ELSE false
-    END AS is_failed,
-    COALESCE(fj.last_failed_time,  fp.last_failed_time)  AS last_failed_time,
-    COALESCE(fj.first_failed_time, fp.first_failed_time) AS first_failed_time,
-    COALESCE(fj.failure_count,     fp.failure_count, 0)  AS failure_count,
-    COALESCE(ja.last_activity_time, pa.last_activity_time) AS last_activity_time,
-    aem.entity_created_time AS entity_created_time,
-    CASE WHEN aem.entity_type='JOB'      THEN aem.entity_id END AS original_job_id,
-    CASE WHEN aem.entity_type='PIPELINE' THEN aem.entity_id END AS original_pipeline_id
-  FROM all_entity_master aem
-  LEFT JOIN identifier(UID_MAP_TBL) idmap_creator
-    ON aem.entity_creator_id = idmap_creator.id
-  LEFT JOIN identifier(UID_MAP_TBL) idmap_runas
-    ON aem.entity_run_as_id  = idmap_runas.id
-  LEFT JOIN failed_jobs_last fj
-    ON aem.entity_type='JOB' AND aem.entity_id=fj.job_id
-  LEFT JOIN failed_pipelines_last fp
-    ON aem.entity_type='PIPELINE' AND aem.entity_id=fp.pipeline_id
-  LEFT JOIN job_last_activity ja
-    ON aem.entity_type='JOB' AND aem.entity_id = ja.job_id
-  LEFT JOIN pipeline_last_activity pa
-    ON aem.entity_type='PIPELINE' AND aem.entity_id = pa.pipeline_id
+    c.entity_key                                   AS node_id,
+    'pipeline'                                     AS node_type,
+    CONCAT(p.name, CASE WHEN p.delete_time IS NOT NULL THEN ' [DELETED]' ELSE '' END) AS node_name,
+    p.pipeline_type                                AS node_description,
+    p.created_by                                   AS node_creator_email,
+    p.run_as                                       AS node_run_as_email,
+    fp.pipeline_id IS NOT NULL                     AS node_is_failed,
+    fp.last_failed_time                            AS node_last_failed_time,
+    fp.first_failed_time                           AS node_first_failed_time,
+    COALESCE(fp.failure_count, 0)                  AS node_failure_count,
+    fp.failure_detail                              AS node_failure_detail,
+    pa.last_activity_time                          AS node_last_activity_time,
+    COALESCE(p.create_time, p.change_time)         AS node_created_time
+  FROM candidate_entities c
+  JOIN pipelines_latest p
+    ON c.entity_kind = 'PIPELINE' AND c.entity_key = p.pipeline_id
+  LEFT JOIN failed_pipelines fp   ON fp.pipeline_id = p.pipeline_id
+  LEFT JOIN pipeline_activity pa  ON pa.pipeline_id = p.pipeline_id
+  WHERE p.delete_time IS NULL OR fp.pipeline_id IS NOT NULL
 ),
 
-dag_nodes AS (
-  SELECT
-    a.entity_id                        AS node_id,
-    lower(a.entity_type)               AS node_type,
-    a.entity_name                      AS node_name,
-    a.entity_description               AS node_description,
-    a.entity_creator_email             AS node_creator_email,
-    a.entity_run_as_email              AS node_run_as_email,
-    a.is_failed                        AS node_is_failed,
-    a.last_failed_time                 AS node_last_failed_time,
-    a.first_failed_time                AS node_first_failed_time,
-    a.failure_count                    AS node_failure_count,
-    a.last_activity_time               AS node_last_activity_time,
-    a.entity_created_time              AS node_created_time,
-    a.original_job_id                  AS node_job_id,
-    a.original_pipeline_id             AS node_pipeline_id,
-    CASE WHEN a.is_failed THEN 'FAILED' ELSE 'HEALTHY' END AS node_status,
-    upper(a.entity_type)               AS node_label
-  FROM entity_master_complete a
+all_nodes AS (
+  SELECT * FROM job_nodes
+  UNION ALL
+  SELECT * FROM pipeline_nodes
 ),
-dag_edges AS (
-  SELECT
-    CONCAT(er.producer_id, '->', er.consumer_id) AS edge_id,
-    er.producer_id      AS source_node_id,
-    lower(er.producer_type) AS source_node_type,
-    er.producer_name    AS source_node_name,
-    er.consumer_id      AS target_node_id,
-    lower(er.consumer_type) AS target_node_type,
-    er.consumer_name    AS target_node_name,
-    er.connecting_table AS edge_table,
-    'DEPENDENCY'        AS edge_label
-  FROM entity_relationships er
+
+-- Keep only edges whose both endpoints survived the metadata join
+valid_edges AS (
+  SELECT e.*
+  FROM all_edges e
+  JOIN all_nodes ns ON ns.node_id = e.producer_key
+  JOIN all_nodes nt ON nt.node_id = e.consumer_key
 )
 
-SELECT 
-  'NODES' AS result_type,
-  node_id AS id,
-  node_type AS type,
-  node_name AS name,
-  node_description AS description,
-  node_creator_email AS creator_email,
-  node_run_as_email AS run_as_email,
-  node_is_failed AS is_failed,
-  node_last_failed_time AS last_failed_time,
-  node_first_failed_time AS first_failed_time,
-  node_failure_count AS failure_count,
-  node_last_activity_time AS last_activity_time,
-  node_created_time AS created_time,
-  node_status AS status,
-  node_label AS label,
-  node_job_id AS job_id,
-  node_pipeline_id AS pipeline_id,
-  NULL AS source_id,
-  NULL AS target_id,
-  NULL AS connecting_table
-FROM dag_nodes
+-- ============================================
+-- 6) Final union: NODES + EDGES in a single table
+-- ============================================
+SELECT
+  'NODES'                       AS result_type,
+  node_id                       AS id,
+  node_type                     AS type,
+  node_name                     AS name,
+  node_description              AS description,
+  node_creator_email            AS creator_email,
+  node_run_as_email             AS run_as_email,
+  node_is_failed                AS is_failed,
+  node_last_failed_time         AS last_failed_time,
+  node_first_failed_time        AS first_failed_time,
+  node_failure_count            AS failure_count,
+  node_failure_detail           AS failure_detail,
+  node_last_activity_time       AS last_activity_time,
+  node_created_time             AS created_time,
+  CASE WHEN node_is_failed THEN 'FAILED' ELSE 'HEALTHY' END AS status,
+  upper(node_type)              AS label,
+  CASE WHEN node_type = 'job'      THEN node_id END AS job_id,
+  CASE WHEN node_type = 'pipeline' THEN node_id END AS pipeline_id,
+  CAST(NULL AS STRING)          AS source_id,
+  CAST(NULL AS STRING)          AS target_id,
+  CAST(NULL AS STRING)          AS connecting_tables,
+  CAST(NULL AS INT)             AS edge_table_count
+FROM all_nodes
 
 UNION ALL
 
-SELECT 
-  'EDGES' AS result_type,
-  edge_id AS id,
-  'dependency' AS type,
-  CONCAT(source_node_name, ' -> ', target_node_name) AS name,
-  CONCAT('Table: ', edge_table) AS description,
-  NULL AS creator_email,
-  NULL AS run_as_email,
-  NULL AS is_failed,
-  NULL AS last_failed_time,
-  NULL AS first_failed_time,
-  NULL AS failure_count,
-  NULL AS last_activity_time,
-  NULL AS created_time,
-  'ACTIVE' AS status,
-  edge_label AS label,
-  NULL AS job_id,
-  NULL AS pipeline_id,
-  source_node_id AS source_id,
-  target_node_id AS target_id,
-  edge_table AS connecting_table
-FROM dag_edges
-
-ORDER BY result_type, id
+SELECT
+  'EDGES'                       AS result_type,
+  CONCAT(producer_key, '->', consumer_key, ':', edge_kind) AS id,
+  lower(edge_kind)              AS type,
+  CONCAT(producer_key, ' -> ', consumer_key)               AS name,
+  CASE WHEN edge_kind = 'TRIGGER'
+       THEN 'Pipeline update triggered by job task'
+       ELSE CONCAT('Tables: ', edge_tables) END             AS description,
+  CAST(NULL AS STRING)          AS creator_email,
+  CAST(NULL AS STRING)          AS run_as_email,
+  CAST(NULL AS BOOLEAN)         AS is_failed,
+  CAST(NULL AS TIMESTAMP)       AS last_failed_time,
+  CAST(NULL AS TIMESTAMP)       AS first_failed_time,
+  CAST(NULL AS BIGINT)          AS failure_count,
+  CAST(NULL AS STRING)          AS failure_detail,
+  CAST(NULL AS TIMESTAMP)       AS last_activity_time,
+  CAST(NULL AS TIMESTAMP)       AS created_time,
+  'ACTIVE'                      AS status,
+  edge_kind                     AS label,
+  CAST(NULL AS STRING)          AS job_id,
+  CAST(NULL AS STRING)          AS pipeline_id,
+  producer_key                  AS source_id,
+  consumer_key                  AS target_id,
+  edge_tables                   AS connecting_tables,
+  edge_table_count              AS edge_table_count
+FROM valid_edges
 );

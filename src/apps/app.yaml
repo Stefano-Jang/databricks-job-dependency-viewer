@@ -1,5 +1,10 @@
+# When deployed with DABs, resources/jiig.apps.yml provides the full config
+# (command + env) from bundle variables — this file is not used.
+# For manual (non-bundle) deployments, uncomment the env section below and
+# fill in your values; the app fails fast with a clear error when they are
+# missing.
 command: [
-  "streamlit", 
+  "streamlit",
   "run",
   "app.py"
 ]
@@ -7,7 +12,9 @@ command: [
 env:
   - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
     value: "false"
-  - name: DAG_TABLE_NAME
-    value: "shared.stefano_jiig.dag_relationships"
-  - name: DATABRICKS_WAREHOUSE_ID
-    value: "862f1d757f0424f7"
+#  - name: DAG_TABLE_NAME
+#    value: "your_catalog.your_schema.dag_relationships_dev"
+#  - name: DATABRICKS_WAREHOUSE_ID
+#    value: "your_warehouse_id"
+#  - name: FAILURE_LOOKBACK_DAYS
+#    value: "7"

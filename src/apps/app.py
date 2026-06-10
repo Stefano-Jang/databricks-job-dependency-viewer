@@ -1,388 +1,389 @@
 import os
+
+import pandas as pd
 import streamlit as st
 from st_link_analysis import st_link_analysis, NodeStyle, EdgeStyle, Event
-import pandas as pd
-from conn import load_dag_data
 
-st.set_page_config(page_title="JIIG", layout="wide")
+from conn import current_user_key, load_graph
+from graph_utils import (
+    build_adjacency,
+    classify_incidents,
+    critical_tables,
+    downstream_hops,
+    owners_of,
+    top_nodes_by_degree,
+    upstream_neighbors,
+)
 
-def _to_str_set(series: pd.Series) -> set:
-    if series is None:
-        return set()
-    return set(series.dropna().astype(str).tolist())
+st.set_page_config(page_title="JIIG", layout="wide", page_icon="🔗")
 
-def undirected_unique_edges(edges_df: pd.DataFrame) -> pd.DataFrame:
-    if edges_df is None or edges_df.empty:
-        return pd.DataFrame(columns=["u", "v"])
-    e = edges_df[["source_id", "target_id"]].dropna().astype(str)
-    e = e[e["source_id"] != e["target_id"]]
-    if e.empty:
-        return pd.DataFrame(columns=["u", "v"])
-    mask = e["source_id"] <= e["target_id"]
-    undirected = pd.DataFrame({
-        "u": e["source_id"].where(mask, e["target_id"]),
-        "v": e["target_id"].where(mask, e["source_id"])
-    })
-    return undirected.drop_duplicates(ignore_index=True)
+ROLE_COLORS = {
+    "ROOT": "#DC3545",      # selected failed entity
+    "FAILED": "#B02A37",    # other failed entities
+    "AFFECTED": "#FD7E14",  # downstream of a failure
+    "CONTEXT": "#ADB5BD",   # upstream context (not impacted)
+    "HEALTHY": "#28A745",
+}
+# icons must exist in st-link-analysis' bundled icon set
+TYPE_ICONS = {"JOB": "analytics", "PIPELINE": "factory"}
+LAYOUTS = ["breadthfirst", "concentric", "cose", "circle", "grid"]
+# Must match the failure_lookback_days bundle variable (set via app env)
+LOOKBACK_DAYS = max(1, int(os.getenv("FAILURE_LOOKBACK_DAYS", "7")))
 
-def most_connected_node(nodes_df: pd.DataFrame, edges_df: pd.DataFrame):
-    ue = undirected_unique_edges(edges_df)
-    if ue.empty:
-        return None, 0, "N/A"
-    degree_counts = pd.concat([ue["u"], ue["v"]], ignore_index=True).value_counts()
-    top_node_id = str(degree_counts.idxmax())
-    top_node_degree = int(degree_counts.max())
-    id_to_name = dict(zip(nodes_df["id"].astype(str), nodes_df["name"].astype(str)))
-    return top_node_id, top_node_degree, id_to_name.get(top_node_id, top_node_id)
-
-def apply_filter_by_mode(df: pd.DataFrame, mode: str) -> pd.DataFrame:
-    if df is None or len(df) == 0:
-        return df
-    nodes_df = df[df["result_type"] == "NODES"].copy()
-    edges_df = df[df["result_type"] == "EDGES"].copy()
-    if nodes_df.empty:
-        return df
-    has_is_failed = "is_failed" in nodes_df.columns
-    failed_ids = _to_str_set(nodes_df[nodes_df["is_failed"] == True]["id"]) if has_is_failed else set()
-    connected_ids = _to_str_set(edges_df["source_id"]) | _to_str_set(edges_df["target_id"])
-    if mode == "failed_subgraph":
-        relevant_edges = edges_df[
-            edges_df["source_id"].astype(str).isin(failed_ids) |
-            edges_df["target_id"].astype(str).isin(failed_ids)
-        ].copy()
-        node_ids = failed_ids | _to_str_set(relevant_edges["source_id"]) | _to_str_set(relevant_edges["target_id"])
-        relevant_nodes = nodes_df[nodes_df["id"].astype(str).isin(node_ids)].copy()
-        return pd.concat([relevant_nodes, relevant_edges], ignore_index=True)
-    if mode == "connected_only":
-        node_ids = connected_ids | failed_ids
-        relevant_nodes = nodes_df[nodes_df["id"].astype(str).isin(node_ids)].copy()
-        relevant_edges = edges_df[
-            edges_df["source_id"].astype(str).isin(node_ids) &
-            edges_df["target_id"].astype(str).isin(node_ids)
-        ].copy()
-        return pd.concat([relevant_nodes, relevant_edges], ignore_index=True)
-    return df
-
-def deduplicate_nodes(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or len(df) == 0:
-        return df
-    nodes_df = df[df["result_type"] == "NODES"].copy()
-    edges_df = df[df["result_type"] == "EDGES"].copy()
-    if nodes_df.empty:
-        return df
-    out = []
-    for _, g in nodes_df.groupby("id"):
-        if len(g) == 1:
-            row = g.iloc[0].copy()
-            row["is_failed"] = bool(row.get("is_failed", False))
-            row["status"] = row.get("status", "FAILED" if row["is_failed"] else "HEALTHY")
-            out.append(row)
-            continue
-        if "is_failed" in g.columns and g["is_failed"].any():
-            failed = g[g["is_failed"] == True]
-            row = failed.sort_values("last_failed_time", ascending=False, na_position="last").iloc[0].copy() if "last_failed_time" in failed.columns else failed.iloc[0].copy()
-        else:
-            row = g.iloc[0].copy()
-            row["is_failed"] = False
-            row["status"] = "HEALTHY"
-        out.append(row)
-    nodes_out = pd.DataFrame(out)
-    return pd.concat([nodes_out, edges_df], ignore_index=True)
-
-def transform_to_st_link_analysis_format(df: pd.DataFrame):
-    nodes_df = df[df["result_type"] == "NODES"].copy()
-    edges_df = df[df["result_type"] == "EDGES"].copy()
-    failure_map = dict(zip(nodes_df["id"].astype(str), nodes_df.get("is_failed", False).fillna(False)))
-    highlight_id = str(st.session_state.get("highlight_node_id", "")) if "highlight_node_id" in st.session_state else ""
-    nodes = []
-    for _, node in nodes_df.iterrows():
-        is_failed = bool(node.get("is_failed", False))
-        entity_type = str(node["type"]).upper()
-        base_style = f"{entity_type}_{'FAILED' if is_failed else 'HEALTHY'}"
-        style_label = base_style if str(node["id"]) != highlight_id else f"{base_style}_HIGHLIGHT"
-        nodes.append({"data": {
-            "id": str(node["id"]),
-            "label": style_label,
-            "name": str(node["name"]),
-            "entity_type": entity_type,
-            "status": str(node.get("status", "")),
-            "failure_count": int(node.get("failure_count", 0)) if pd.notna(node.get("failure_count")) else 0,
-            "last_active_time": str(node.get("last_activity_time") or ""),
-            "last_failed_time": str(node.get("last_failed_time") or ""),
-            "job_id": str(node.get("job_id") or ""),
-            "pipeline_id": str(node.get("pipeline_id") or ""),
-            "creator": str(node.get("creator_email") or ""),
-            "run_as": str(node.get("run_as_email") or "")
-        }})
-    edges = []
-    for _, edge in edges_df.iterrows():
-        s = str(edge["source_id"]); t = str(edge["target_id"])
-        edge_label = "DEPENDENCY_FAILED" if bool(failure_map.get(s, False)) else "DEPENDENCY_HEALTHY"
-        edges.append({"data": {
-            "id": str(edge["id"]),
-            "label": edge_label,
-            "source": s,
-            "target": t,
-            "connecting_table": str(edge.get("connecting_table", "")),
-            "source_failed": bool(failure_map.get(s, False)),
-            "target_failed": bool(failure_map.get(t, False))
-        }})
-    return {"nodes": nodes, "edges": edges}
 
 def create_node_styles():
-    return [
-        NodeStyle("JOB_HEALTHY", "#28A745", "name", "group"),
-        NodeStyle("JOB_FAILED", "#DC3545", "name", "group"),
-        NodeStyle("PIPELINE_HEALTHY", "#28A745", "name", "person"),
-        NodeStyle("PIPELINE_FAILED", "#DC3545", "name", "person"),
-        NodeStyle("JOB_HEALTHY_HIGHLIGHT", "#9900FF", "name", "campaign"),
-        NodeStyle("JOB_FAILED_HIGHLIGHT", "#9900FF", "name", "campaign"),
-        NodeStyle("PIPELINE_HEALTHY_HIGHLIGHT", "#9900FF", "name", "campaign"),
-        NodeStyle("PIPELINE_FAILED_HIGHLIGHT", "#9900FF", "name", "campaign"),
-    ]
+    styles = []
+    for etype, icon in TYPE_ICONS.items():
+        for role, color in ROLE_COLORS.items():
+            styles.append(NodeStyle(f"{etype}_{role}", color, "name", icon))
+    return styles
+
 
 def create_edge_styles():
     return [
-        EdgeStyle("DEPENDENCY_HEALTHY", caption="connecting_table", directed=True),
-        EdgeStyle("DEPENDENCY_FAILED", caption="connecting_table", directed=True),
+        EdgeStyle("DEPENDENCY", caption="caption_text", directed=True),
+        EdgeStyle("TRIGGER", caption="caption_text", directed=True),
     ]
 
-def compute_metrics(nodes_df: pd.DataFrame, edges_df: pd.DataFrame):
-    e_dir = len(edges_df)
-    connected_ids = _to_str_set(edges_df["source_id"]) | _to_str_set(edges_df["target_id"])
-    n_conn = len(connected_ids)
-    n_all = len(nodes_df)
-    ue = undirected_unique_edges(edges_df)
-    e_undir = len(ue)
-    avg_conn = (2 * e_undir / n_conn) if n_conn > 0 else 0.0
-    failed = len(nodes_df[nodes_df["is_failed"] == True]) if "is_failed" in nodes_df.columns else 0
-    healthy = n_all - failed
-    avg_degree = (failed + healthy) / e_undir if e_undir > 0 else 0.0
-    return {
-        "edges_directed": e_dir,
-        "edges_undirected": e_undir,
-        "num_nodes_connected": n_conn,
-        "num_nodes_all": n_all,
-        "avg_degree_all": avg_degree,
-        "avg_degree_connected": avg_conn,
-        "failed_entities": failed,
-        "healthy_entities": healthy,
-    }
 
-def _parse_ts_utc(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, utc=True, errors="coerce")
-
-def recompute_is_failed_by_window(df: pd.DataFrame, window_hours: float) -> pd.DataFrame:
-    if df is None or len(df) == 0:
-        return df
-    out = df.copy()
-    nodes_mask = out["result_type"] == "NODES"
-    if not nodes_mask.any():
-        return out
-    lft = _parse_ts_utc(out.loc[nodes_mask, "last_failed_time"]) if "last_failed_time" in out.columns else None
-    if lft is None:
-        return out
+def recompute_failed_window(nodes_df: pd.DataFrame, window_hours: float) -> pd.DataFrame:
+    """A node counts as failed only if its last failure is inside the window."""
+    out = nodes_df.copy()
     now_utc = pd.Timestamp.now(tz="UTC")
-    since_utc = now_utc - pd.Timedelta(hours=float(window_hours))
-    dyn_failed = (lft.notna()) & (lft >= since_utc) & (lft <= now_utc)
-    if "is_failed" not in out.columns:
-        out["is_failed"] = False
-    out.loc[nodes_mask, "is_failed"] = dyn_failed.values
+    since = now_utc - pd.Timedelta(hours=float(window_hours))
+    lft = out["last_failed_time"]
+    out["is_failed"] = lft.notna() & (lft >= since) & (lft <= now_utc)
+    out["status"] = out["is_failed"].map({True: "FAILED", False: "HEALTHY"})
     return out
 
-def drop_isolated_nodes(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or len(df) == 0:
-        return df
-    nodes_df = df[df["result_type"] == "NODES"].copy()
-    edges_df = df[df["result_type"] == "EDGES"].copy()
-    if nodes_df.empty:
-        return df
-    if edges_df.empty:
-        return df.iloc[0:0]
-    connected_ids = _to_str_set(edges_df["source_id"]) | _to_str_set(edges_df["target_id"])
-    nodes_keep = nodes_df[nodes_df["id"].astype(str).isin(connected_ids)].copy()
-    edges_keep = edges_df[
-        edges_df["source_id"].astype(str).isin(connected_ids) &
-        edges_df["target_id"].astype(str).isin(connected_ids)
+
+def _s(value) -> str:
+    """NaN/None-safe string."""
+    return "" if value is None or pd.isna(value) else str(value)
+
+
+def edge_caption(row) -> str:
+    if str(row.type) == "trigger":
+        return "triggers"
+    tables = _s(row.connecting_tables)
+    first = tables.split(", ")[0] if tables else ""
+    count = int(row.edge_table_count) if pd.notna(row.edge_table_count) else 0
+    return f"{first} (+{count - 1})" if count > 1 else first
+
+
+def build_elements(nodes_df, edges_df, roles: dict):
+    """Build st-link-analysis elements; roles maps node_id -> ROLE."""
+    nodes = []
+    for row in nodes_df.itertuples(index=False):
+        nid = str(row.id)
+        etype = str(row.type).upper()
+        role = roles.get(nid, "HEALTHY")
+        nodes.append({"data": {
+            "id": nid,
+            "label": f"{etype}_{role}",
+            "name": _s(row.name),
+            "entity_type": etype,
+            "role": role,
+            "status": _s(row.status),
+            "failure_count": int(row.failure_count),
+            "failure_detail": _s(row.failure_detail),
+            "last_failed_time": _s(row.last_failed_time),
+            "last_activity_time": _s(row.last_activity_time),
+            "creator": _s(row.creator_email),
+            "run_as": _s(row.run_as_email),
+        }})
+    edges = []
+    for row in edges_df.itertuples(index=False):
+        edges.append({"data": {
+            "id": str(row.id),
+            "label": str(row.type).upper(),
+            "source": str(row.source_id),
+            "target": str(row.target_id),
+            "caption_text": edge_caption(row),
+            "connecting_tables": _s(row.connecting_tables),
+        }})
+    return {"nodes": nodes, "edges": edges}
+
+
+def render_graph(nodes_df, edges_df, roles, layout, key, height=650):
+    elements = build_elements(nodes_df, edges_df, roles)
+    ret = st_link_analysis(
+        elements,
+        layout={"name": layout, "animate": True, "fit": True, "padding": 60},
+        node_styles=create_node_styles(),
+        edge_styles=create_edge_styles(),
+        events=[Event("clicked_node", "click tap", "node")],
+        key=key,
+        height=height,
+    )
+    if isinstance(ret, dict) and ret.get("action") == "clicked_node":
+        tid = (ret.get("data") or {}).get("target_id")
+        if isinstance(tid, (str, int)):
+            return str(tid)
+    return None
+
+
+def node_detail_panel(nodes_df: pd.DataFrame, node_id: str):
+    sel = nodes_df[nodes_df["id"] == str(node_id)].head(1)
+    if sel.empty:
+        return
+    row = sel.iloc[0]
+    ntype = str(row["type"]).lower()
+    host = os.getenv("DATABRICKS_HOST", "").strip().rstrip("/")
+    if host and not host.startswith("http"):
+        host = f"https://{host}"
+    url = f"{host}/{'jobs' if ntype == 'job' else 'pipelines'}/{row['id']}" if host else ""
+    with st.container(border=True):
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.markdown(f"**{_s(row['name'])}**  ·  {ntype}  ·  `{row['id']}`")
+            st.caption(
+                f"owner: {_s(row['run_as_email']) or _s(row['creator_email']) or '-'}  |  "
+                f"failures: {row['failure_count']}  |  "
+                f"last failed: {_s(row['last_failed_time']) or '-'}  |  "
+                f"detail: {_s(row['failure_detail']) or '-'}"
+            )
+        with c2:
+            if url:
+                st.link_button("Open in Databricks", url, use_container_width=True)
+
+
+def notification_text(root_row, affected_df: pd.DataFrame, owners: list, depth: int) -> str:
+    lines = [
+        f"[JIIG] Incident: {root_row['name']} ({root_row['type']}) failed",
+        f"Last failed (UTC): {root_row['last_failed_time']}",
+        f"Failure detail: {_s(root_row['failure_detail']) or '-'}",
+        f"Downstream impact within {depth} hops: "
+        f"{len(affected_df)} entities, {len(owners)} owners",
+        "",
+        "Affected entities:",
+    ]
+    for row in affected_df.itertuples(index=False):
+        owner = _s(row.run_as_email) or _s(row.creator_email) or "-"
+        lines.append(f"  - [hop {row.hop}] {row.name} ({row.type}) — {owner}")
+    lines += ["", "Owners to notify: " + ", ".join(owners)]
+    return "\n".join(lines)
+
+
+def incident_view(nodes_df, edges_df, forward, reverse, layout, depth, window_hours):
+    failed_nodes = nodes_df[nodes_df["is_failed"]].copy()
+    failed_ids = failed_nodes["id"].tolist()
+
+    failed_times = dict(zip(failed_nodes["id"], failed_nodes["last_failed_time"]))
+    incidents = classify_incidents(failed_ids, forward, depth, failed_times)
+    all_affected = set().union(*(set(i["affected"]) for i in incidents.values())) if incidents else set()
+    all_owners = owners_of(nodes_df, all_affected)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("🔴 Failed entities", len(failed_ids))
+    c2.metric("🟠 Affected (transitive)", len(all_affected - set(failed_ids)))
+    c3.metric("👥 Owners to notify", len(all_owners))
+    c4.metric("🔗 Edges", len(edges_df))
+    freshness = nodes_df["last_activity_time"].max()
+    c5.metric("🕒 Data up to (UTC)", "-" if pd.isna(freshness) else freshness.strftime("%m-%d %H:%M"))
+
+    if not failed_ids:
+        st.success("No Job/Pipeline failures within the selected window. 🎉")
+        return
+
+    # ---------- incident summary table ----------
+    rows = []
+    for fid in failed_ids:
+        info = incidents[fid]
+        node = nodes_df[nodes_df["id"] == fid].iloc[0]
+        owners = owners_of(nodes_df, set(info["affected"]))
+        rows.append({
+            "name": node["name"],
+            "type": node["type"],
+            "classification": "CASCADE" if info["is_cascade"] else "ROOT CAUSE",
+            "last_failed (UTC)": node["last_failed_time"],
+            f"failures ({LOOKBACK_DAYS}d)": node["failure_count"],
+            "blast_radius": len(info["affected"]),
+            "owners_affected": len(owners),
+            "failure_detail": node["failure_detail"],
+            "id": fid,
+        })
+    inc_df = (
+        pd.DataFrame(rows)
+        .sort_values(["blast_radius", "last_failed (UTC)"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
+
+    st.markdown("#### 🚨 Incidents (select a row to analyze impact)")
+    st.caption(
+        "ROOT CAUSE: failure with no failed upstream — start here. "
+        "CASCADE: sits downstream of another failure, likely a consequence."
+    )
+    selection = st.dataframe(
+        inc_df,
+        hide_index=True,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"incident_table_{window_hours}_{depth}",
+        column_config={"id": None},
+    )
+
+    sel_rows = []
+    if selection is not None:
+        try:
+            sel_rows = list(selection.selection.rows)
+        except (AttributeError, TypeError):
+            sel_rows = list(selection.get("selection", {}).get("rows", []))
+    sel_rows = [r for r in sel_rows if r < len(inc_df)]
+    if not sel_rows:
+        st.info("Select an incident above to see its impact subgraph and insights.")
+        return
+
+    root_id = str(inc_df.iloc[sel_rows[0]]["id"])
+    root_row = nodes_df[nodes_df["id"] == root_id].iloc[0]
+    info = incidents[root_id]
+    affected = info["affected"]
+
+    # ---------- incident detail ----------
+    st.markdown(f"### 🎯 Impact of `{root_row['name']}`")
+
+    sub_ids = {root_id} | set(affected)
+    context_ids = upstream_neighbors(reverse, {root_id})
+    show_ids = sub_ids | context_ids
+
+    sub_nodes = nodes_df[nodes_df["id"].isin(show_ids)].copy()
+    sub_edges = edges_df[
+        edges_df["source_id"].isin(show_ids) & edges_df["target_id"].isin(show_ids)
     ].copy()
-    return pd.concat([nodes_keep, edges_keep], ignore_index=True)
+    # keep the picture focused: drop context-to-context edges
+    sub_edges = sub_edges[
+        sub_edges["source_id"].isin(sub_ids) | sub_edges["target_id"].isin(sub_ids)
+    ]
+
+    roles = {nid: "AFFECTED" for nid in affected}
+    for nid in sub_nodes[sub_nodes["is_failed"]]["id"]:
+        roles[nid] = "FAILED"
+    for nid in context_ids:
+        roles.setdefault(nid, "CONTEXT")
+    roles[root_id] = "ROOT"
+
+    graph_col, insight_col = st.columns([3, 2])
+
+    with graph_col:
+        clicked = render_graph(sub_nodes, sub_edges, roles, layout, key=f"impact_{root_id}")
+        node_detail_panel(nodes_df, clicked or root_id)
+
+    with insight_col:
+        affected_df = (
+            nodes_df[nodes_df["id"].isin(affected)]
+            .assign(hop=lambda d: d["id"].map(affected))
+            .sort_values(["hop", "name"])
+        )
+        owners = owners_of(nodes_df, set(affected))
+
+        st.markdown("**Affected entities by hop**")
+        if affected_df.empty:
+            st.write("No downstream consumers found in the lineage window.")
+        else:
+            st.dataframe(
+                affected_df[["hop", "name", "type", "run_as_email", "is_failed"]],
+                hide_index=True, use_container_width=True, height=240,
+            )
+
+        tables = critical_tables(forward, root_id, affected)
+        if tables:
+            st.markdown("**Critical tables (feeding most consumers)**")
+            st.dataframe(
+                pd.DataFrame(tables, columns=["table", "consumers"]),
+                hide_index=True, use_container_width=True, height=180,
+            )
+
+        if owners:
+            st.markdown("**Owners to notify**")
+            st.code(", ".join(owners), language=None)
+
+        with st.expander("📋 Notification draft", expanded=False):
+            st.code(notification_text(root_row, affected_df, owners, depth), language=None)
+
+
+def full_graph_view(nodes_df, edges_df, forward, layout, depth):
+    st.caption(
+        "Overview of every active entity in the window. The view is capped for "
+        "responsiveness — failed nodes are always kept, the rest ranked by degree."
+    )
+    cap = st.slider("Max nodes to render", 50, 1000, 300, 50)
+
+    failed_ids = nodes_df[nodes_df["is_failed"]]["id"].tolist()
+    affected = set()
+    for fid in failed_ids:
+        affected |= set(downstream_hops(forward, fid, depth))
+
+    keep = top_nodes_by_degree(nodes_df, edges_df, cap)
+    keep |= set(failed_ids)
+    view_nodes = nodes_df[nodes_df["id"].isin(keep)]
+    view_edges = edges_df[
+        edges_df["source_id"].isin(keep) & edges_df["target_id"].isin(keep)
+    ]
+    if len(nodes_df) > len(view_nodes):
+        st.warning(
+            f"Showing {len(view_nodes)} of {len(nodes_df)} nodes "
+            f"({len(view_edges)} edges). Raise the cap to see more."
+        )
+
+    roles = {nid: "AFFECTED" for nid in affected}
+    for nid in failed_ids:
+        roles[nid] = "FAILED"
+
+    clicked = render_graph(view_nodes, view_edges, roles, layout, key="full_graph", height=700)
+    if clicked:
+        node_detail_panel(nodes_df, clicked)
+
 
 def main():
-    st.title("🔗 Job & Pipeline Dependency Graph(within 24 hours)")
-    if "applied_filter_mode" not in st.session_state:
-        st.session_state["applied_filter_mode"] = "failed_subgraph"
-    if "applied_layout" not in st.session_state:
-        st.session_state["applied_layout"] = "concentric"
-    if "applied_failure_window_hours" not in st.session_state:
-        st.session_state["applied_failure_window_hours"] = 24.0
-    if "applied_show_isolated" not in st.session_state:
-        st.session_state["applied_show_isolated"] = False
+    st.title("🔗 JIIG — Job Incidents Identification Graph")
 
-    st.sidebar.header("🔧 Filters")
-    mode_label_to_key = {
-        "(1) Failed+affected": "failed_subgraph",
-        "(2) (1) + edge node": "connected_only",
-        "(3) All nodes": "all",
-    }
-    selected_label = st.sidebar.radio(
-        "Select Filter Options",
-        list(mode_label_to_key.keys()),
-        index=["failed_subgraph","connected_only","all"].index(st.session_state["applied_filter_mode"]),
-        key="filter_mode_label"
+    st.sidebar.header("🔧 Analysis settings")
+    max_hours = LOOKBACK_DAYS * 24
+    window_hours = st.sidebar.slider(
+        "Failure window (hours)", 1, max_hours, min(24, max_hours),
+        help="Only failures within this window are treated as incidents.",
     )
-    pending_filter_mode = mode_label_to_key[selected_label]
-
-    st.sidebar.header("Layout")
-    layouts = ["concentric", "cose", "breadthfirst", "circle", "grid"]
-    pending_layout = st.sidebar.selectbox(
-        "Graph layout (applied on Redraw)",
-        layouts,
-        index=layouts.index(st.session_state.get("applied_layout", "concentric")),
-        key="layout_selectbox"
+    depth = st.sidebar.slider(
+        "Impact depth (hops)", 1, 5, 3,
+        help="How many dependency hops to follow downstream of a failure.",
     )
-
-    st.sidebar.header("Failure Window")
-    pending_failure_window_hours = st.sidebar.slider(
-        "Failure window (hours)",
-        min_value=0.5, max_value=24.0, value=float(st.session_state["applied_failure_window_hours"]),
-        step=0.5,
-        help="Nodes with last_failed_time within this window are considered failed."
-    )
-
-    st.sidebar.header("Isolated Nodes")
-    pending_show_isolated = st.sidebar.checkbox(
-        "Show isolated nodes",
-        value=bool(st.session_state["applied_show_isolated"]),
-        help="When OFF, nodes with no edges are hidden from the graph."
-    )
-
-    if st.sidebar.button("🔄 Redraw Graph", use_container_width=True):
-        st.session_state["applied_filter_mode"] = pending_filter_mode
-        st.session_state["applied_layout"] = pending_layout
-        st.session_state["applied_failure_window_hours"] = float(pending_failure_window_hours)
-        st.session_state["applied_show_isolated"] = bool(pending_show_isolated)
+    layout = st.sidebar.selectbox("Graph layout", LAYOUTS, index=0)
+    if st.sidebar.button("🔄 Refresh data", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-    st.sidebar.header("Legends")
-    st.sidebar.markdown("ICON: 👤 Jobs, 👥 Pipelines")
-    st.sidebar.markdown("COLOR: 🔴 Unhealthy, 🟢 Healthy")
+    st.sidebar.header("Legend")
+    st.sidebar.markdown(
+        "- 🔴 **ROOT**: selected failure\n"
+        "- 🟥 **FAILED**: other failures\n"
+        "- 🟠 **AFFECTED**: downstream impact\n"
+        "- ⚪ **CONTEXT**: direct upstream\n"
+        "- 🟢 **HEALTHY**\n\n"
+        "Icons: 📊 Lakeflow Job · 🏭 Pipeline (SDP)\n\n"
+        "Edges: table dependency / job→pipeline trigger"
+    )
 
-    focus_val = None
     try:
-        focus_val = st.query_params.get("focus", None)
-    except Exception:
-        try:
-            focus_val = st.experimental_get_query_params().get("focus", None)
-        except Exception:
-            focus_val = None
-    if focus_val:
-        st.session_state["highlight_node_id"] = focus_val[0] if isinstance(focus_val, list) else str(focus_val)
+        with st.spinner("Loading dependency graph..."):
+            nodes_df, edges_df = load_graph(current_user_key())
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return
 
-    applied_filter_mode = st.session_state["applied_filter_mode"]
-    applied_layout = st.session_state.get("applied_layout", "concentric")
-    applied_failure_window_hours = float(st.session_state.get("applied_failure_window_hours", 24.0))
-    applied_show_isolated = bool(st.session_state.get("applied_show_isolated", False))
+    if nodes_df.empty:
+        st.warning("No data available — run the JIIG job first.")
+        return
 
-    with st.spinner("Loading DAG data..."):
-        try:
-            df_raw = load_dag_data()
-            if df_raw is None or len(df_raw) == 0:
-                st.warning("No data available")
-                return
+    nodes_df = recompute_failed_window(nodes_df, window_hours)
+    forward, reverse = build_adjacency(edges_df)
 
-            df_isf = recompute_is_failed_by_window(df_raw, applied_failure_window_hours)
-            df_filtered = apply_filter_by_mode(df_isf, applied_filter_mode)
-            df = deduplicate_nodes(df_filtered)
-            if not applied_show_isolated:
-                df = drop_isolated_nodes(df)
+    tab_incidents, tab_full = st.tabs(["🚨 Incidents", "🌐 Full graph"])
+    with tab_incidents:
+        incident_view(nodes_df, edges_df, forward, reverse, layout, depth, window_hours)
+    with tab_full:
+        full_graph_view(nodes_df, edges_df, forward, layout, depth)
 
-            nodes_df = df[df["result_type"] == "NODES"].copy()
-            edges_df = df[df["result_type"] == "EDGES"].copy()
-
-            m = compute_metrics(nodes_df, edges_df)
-            top_node_id, top_node_degree, top_node_name = most_connected_node(nodes_df, edges_df)
-
-            c1, c2, c3, c4, c5 = st.columns(5)
-            with c1: st.metric("🔴 Failed", m["failed_entities"])
-            with c2: st.metric("🟢 Healthy", m["healthy_entities"])
-            with c3: st.metric("Edges (undirected)", m["edges_undirected"])
-            with c4: st.metric("Avg Degree (all)", f"{m['avg_degree_all']:.2f}")
-            with c5:
-                st.markdown("Most Connected Node")
-                if top_node_id:
-                    if st.button(f"📍 {top_node_name} ({top_node_degree})"):
-                        st.session_state["highlight_node_id"] = top_node_id
-                else:
-                    st.markdown("N/A")
-
-            elements = transform_to_st_link_analysis_format(df)
-            node_styles = create_node_styles()
-            edge_styles = create_edge_styles()
-            layout_config = {"name": applied_layout, "animate": True, "fit": True, "padding": 80}
-
-            events = [Event("clicked_node", "click tap", "node")]
-            ret = st_link_analysis(
-                elements,
-                layout=layout_config,
-                node_styles=node_styles,
-                edge_styles=edge_styles,
-                events=events,
-                key="dag_graph",
-                height=800
-            )
-
-            selected_node_id = None
-            if isinstance(ret, dict) and ret.get("action") == "clicked_node":
-                data = ret.get("data") or {}
-                tid = data.get("target_id")
-                if isinstance(tid, (str, int)):
-                    selected_node_id = str(tid)
-
-            st.markdown("---")
-            st.markdown("### Node Navigation")
-            sel = nodes_df[nodes_df["id"].astype(str) == str(selected_node_id)].head(1) if selected_node_id else pd.DataFrame()
-            node_type = str(sel.iloc[0]["type"]).strip().lower() if not sel.empty else "-"
-            node_name = str(sel.iloc[0]["name"]) if not sel.empty else "-"
-            node_creator = str(sel.iloc[0].get("creator_email") or "") if not sel.empty else "-"
-            entity_id = (
-                str(sel.iloc[0].get("job_id")) if not sel.empty and node_type == "job" and pd.notna(sel.iloc[0].get("job_id"))
-                else str(sel.iloc[0].get("pipeline_id")) if not sel.empty and node_type == "pipeline" and pd.notna(sel.iloc[0].get("pipeline_id"))
-                else (str(selected_node_id) if selected_node_id else "-")
-            )
-            display_id = entity_id if entity_id else "-"
-
-            cols = st.columns([3, 2])
-            with cols[0]:
-                st.write(f"ID: `{display_id}`  •  Type: {node_type}  •  Name: {node_name}  •  Creator: {node_creator}")
-            with cols[1]:
-                host_raw = os.getenv("DATABRICKS_HOST", "").strip().rstrip("/")
-                base = host_raw if (host_raw.startswith("http://") or host_raw.startswith("https://")) else (f"https://{host_raw}" if host_raw else "")
-                can_navigate = False
-                url = ""
-                if display_id != "-" and node_type in ("job", "pipeline") and base:
-                    path = f"jobs/{display_id}" if node_type == "job" else f"pipelines/{display_id}"
-                    url = f"{base}/{path}"
-                    can_navigate = True
-                if can_navigate and url:
-                    try:
-                        st.link_button("Open in Databricks", url)
-                    except Exception:
-                        if st.button("Open in Databricks"):
-                            st.markdown(f"[Open in Databricks]({url})")
-                else:
-                    if st.button("Open in Databricks"):
-                        if display_id == "-" or not selected_node_id:
-                            st.warning("Select a node first.", icon="⚠️")
-                        elif node_type not in ("job", "pipeline"):
-                            st.warning("Unknown node type.", icon="⚠️")
-                        elif not base:
-                            st.warning("DATABRICKS_HOST is not set.", icon="⚠️")
-                        else:
-                            st.warning("Cannot build a valid navigation URL for the selected node.", icon="⚠️")
-
-        except Exception as e:
-            st.error(f"Error loading data: {str(e)}")
 
 if __name__ == "__main__":
     main()
