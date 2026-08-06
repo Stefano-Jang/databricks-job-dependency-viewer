@@ -1,4 +1,5 @@
 import os
+from itertools import combinations
 
 import pandas as pd
 import streamlit as st
@@ -43,12 +44,14 @@ TYPE_ICONS = {
 LAYOUTS = ["dagre", "breadthfirst", "concentric", "cose", "circle", "grid", "fcose", "cola"]
 # The SQL merges parallel edge kinds into one row, so an edge label can be a
 # combination ("dependency+trigger"). Every value needs a style or the edge
-# renders unstyled.
-EDGE_KINDS = ["DEPENDENCY", "TRIGGER", "TABLE_TRIGGER"]
+# renders unstyled, so the combinations are generated rather than hand-listed --
+# adding a kind here is enough. Order matches the SQL, which emits
+# sort_array(collect_set(edge_kind)), so only sorted combinations occur.
+EDGE_KINDS = ["DEPENDENCY", "TABLE_TRIGGER", "TRIGGER"]
 EDGE_LABELS = [
-    "DEPENDENCY", "TRIGGER", "TABLE_TRIGGER",
-    "DEPENDENCY+TRIGGER", "DEPENDENCY+TABLE_TRIGGER", "TRIGGER+TABLE_TRIGGER",
-    "DEPENDENCY+TABLE_TRIGGER+TRIGGER", "DEPENDENCY+TRIGGER+TABLE_TRIGGER",
+    "+".join(combo)
+    for size in range(1, len(EDGE_KINDS) + 1)
+    for combo in combinations(sorted(EDGE_KINDS), size)
 ]
 # Must match the failure_lookback_days bundle variable (set via app env)
 LOOKBACK_DAYS = max(1, int(os.getenv("FAILURE_LOOKBACK_DAYS", "7")))

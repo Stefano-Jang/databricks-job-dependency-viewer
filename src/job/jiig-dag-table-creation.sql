@@ -22,6 +22,10 @@ DECLARE OR REPLACE EDGE_TBL              STRING DEFAULT {{lineage_edge_table}};
 DECLARE OR REPLACE FAILURE_LOOKBACK_DAYS INT    DEFAULT CAST({{failure_lookback_days}} AS INT);
 -- Hops to follow when precomputing downstream_reach
 DECLARE OR REPLACE IMPACT_MAX_DEPTH      INT    DEFAULT CAST({{impact_max_depth}} AS INT);
+-- The reach join chain below is unrolled to 5 levels, so a larger
+-- IMPACT_MAX_DEPTH cannot be honoured here; clamp instead of truncating quietly.
+DECLARE OR REPLACE REACH_DEPTH_LIMIT     INT    DEFAULT 5;
+DECLARE OR REPLACE REACH_DEPTH           INT    DEFAULT least(IMPACT_MAX_DEPTH, REACH_DEPTH_LIMIT);
 
 DECLARE OR REPLACE TARGET_SCHEMA STRING DEFAULT regexp_extract(DAG_TBL, '^(.*)\\.[^.]+$', 1);
 CREATE SCHEMA IF NOT EXISTS identifier(TARGET_SCHEMA);
@@ -273,6 +277,11 @@ valid_edges AS (
 -- expanded as fixed-depth joins instead of WITH RECURSIVE: path-tracking
 -- recursion over every node blows the 1M recursion-row limit on a large
 -- workspace, while bounded joins stay well inside it.
+--
+-- The chain is unrolled to REACH_DEPTH_LIMIT (5) levels. IMPACT_MAX_DEPTH above
+-- that would silently truncate reach and therefore mis-rank criticality, so it
+-- is clamped here and the clamp is visible in the output rather than implicit.
+-- Raising the limit means adding h6/h7 CTEs below, not just changing this value.
 e AS (
   SELECT DISTINCT
     concat_ws(':', producer_kind, producer_key) AS src,
@@ -281,13 +290,13 @@ e AS (
 ),
 h1 AS (SELECT src AS root, dst AS node FROM e),
 h2 AS (SELECT DISTINCT a.root, x.dst AS node FROM h1 a JOIN e x ON x.src = a.node
-       WHERE IMPACT_MAX_DEPTH >= 2 AND x.dst <> a.root),
+       WHERE REACH_DEPTH >= 2 AND x.dst <> a.root),
 h3 AS (SELECT DISTINCT a.root, x.dst AS node FROM h2 a JOIN e x ON x.src = a.node
-       WHERE IMPACT_MAX_DEPTH >= 3 AND x.dst <> a.root),
+       WHERE REACH_DEPTH >= 3 AND x.dst <> a.root),
 h4 AS (SELECT DISTINCT a.root, x.dst AS node FROM h3 a JOIN e x ON x.src = a.node
-       WHERE IMPACT_MAX_DEPTH >= 4 AND x.dst <> a.root),
+       WHERE REACH_DEPTH >= 4 AND x.dst <> a.root),
 h5 AS (SELECT DISTINCT a.root, x.dst AS node FROM h4 a JOIN e x ON x.src = a.node
-       WHERE IMPACT_MAX_DEPTH >= 5 AND x.dst <> a.root),
+       WHERE REACH_DEPTH >= 5 AND x.dst <> a.root),
 
 reach AS (
   SELECT root, COUNT(DISTINCT node) AS downstream_reach

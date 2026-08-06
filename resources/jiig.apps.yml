@@ -22,7 +22,5 @@ resources:
             value: ${var.warehouse_id}
           - name: FAILURE_LOOKBACK_DAYS
             value: ${var.failure_lookback_days}
-          - name: LINEAGE_EDGE_TABLE
-            value: ${var.lineage_edge_table}
           - name: IMPACT_MAX_DEPTH
             value: ${var.impact_max_depth}
