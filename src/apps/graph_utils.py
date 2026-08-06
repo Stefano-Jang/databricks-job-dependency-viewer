@@ -116,22 +116,23 @@ def owners_of(nodes_df: pd.DataFrame, node_ids: set) -> list:
     return sorted(owners)
 
 
-def top_nodes_by_degree(nodes_df: pd.DataFrame, edges_df: pd.DataFrame, cap: int) -> set:
-    """Node ids to keep for the capped full-graph view: failed nodes always
-    survive, the rest ranked by degree."""
-    failed = set(nodes_df[nodes_df["is_failed"] == True]["id"].astype(str))
-    degree = (
-        pd.concat([edges_df["source_id"], edges_df["target_id"]])
-        .astype(str).value_counts()
-    )
-    keep = set(failed)
-    for nid in degree.index:
-        if len(keep) >= cap:
-            break
-        keep.add(str(nid))
-    if len(keep) < cap:
-        for nid in nodes_df["id"].astype(str):
-            if len(keep) >= cap:
+def owners_by_kind(nodes_df: pd.DataFrame, node_ids: set) -> dict:
+    """Map consumer node type -> list of owner emails for notifications.
+
+    Allows notifications to be grouped per consumer kind (e.g., separate wording
+    for dashboard owners vs job owners).
+    """
+    if nodes_df is None or nodes_df.empty or not node_ids:
+        return {}
+    sub = nodes_df[nodes_df["id"].astype(str).isin({str(n) for n in node_ids})]
+    result = {}
+    for row in sub.itertuples(index=False):
+        ntype = str(getattr(row, "type", "unknown")).lower()
+        owner = None
+        for candidate in (getattr(row, "run_as_email", None), getattr(row, "creator_email", None)):
+            if candidate is not None and pd.notna(candidate) and str(candidate):
+                owner = str(candidate)
                 break
-            keep.add(nid)
-    return keep
+        if owner:
+            result.setdefault(ntype, set()).add(owner)
+    return {k: sorted(v) for k, v in result.items()}

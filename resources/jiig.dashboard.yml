@@ -10,20 +10,3 @@ resources:
       # catalog/schema at deploy time — no manual parameter editing needed.
       dataset_catalog: ${var.jiig_catalog}
       dataset_schema: ${var.jiig_schema}
-  # jobs:
-  #   dashboard_snapshot_job:
-  #     tags: 
-  #       project: jiig
-  #       creator: databricks
-  #     name: "${var.account_name} JIIG dashboard refresh"
-
-  #     schedule:
-  #       quartz_cron_expression: '0 0/30 * * * ?'
-  #       timezone_id: UTC
-  #       pause_status: UNPAUSED
-
-  #     tasks:
-  #       - task_key: jiig_dashboard_task
-  #         dashboard_task:
-  #           warehouse_id: ${var.warehouse_id}
-  #           dashboard_id: ${resources.dashboards.jiig_dashboard.id}
