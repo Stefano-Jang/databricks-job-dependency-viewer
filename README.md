@@ -125,7 +125,7 @@ Other commonly changed variables:
 ### 3. Validate, deploy, and refresh
 
 ```bash
-databricks bundle validate -t dev \
+databricks bundle validate --strict -t dev \
   --profile <profile> \
   --var="workspace_id=<numeric-workspace-id>"
 
@@ -143,6 +143,76 @@ databricks bundle run job_dependency_graph -t dev \
 ```
 
 The development target pauses schedules by default. The production target enables the 30-minute schedule after a successful production deployment.
+
+### 4. Deploy with an LLM client (Claude, Codex, or similar)
+
+Run the LLM client from the repository root so it can inspect `databricks.yml`, the bundle resources, and the app source. Always provide the Databricks profile explicitly; do not let the client choose a workspace on your behalf.
+
+#### Discover the required values without deploying
+
+Use this prompt when you know the profile but still need the workspace ID or SQL warehouse:
+
+```text
+Prepare this JIIG repository for deployment to Databricks profile <profile>,
+but do not deploy anything yet.
+
+Use the Databricks CLI and the repository's bundle configuration. Do not
+auto-select or change profiles. Confirm authentication, determine the numeric
+workspace ID, list the SQL warehouses I can use, and show the resolved dev
+resource names. Ask me to choose a warehouse if I have not supplied one.
+Return the exact validate, deploy, initial snapshot, app start, and verification
+commands you intend to run.
+```
+
+#### Perform the first deployment
+
+For a new target, use this prompt. The order is important: a bare bundle deployment creates the app resource but does not start it, the snapshot Job creates the required tables, and only then is the app started.
+
+```text
+Deploy the current JIIG repository to Databricks using:
+- profile: <profile>
+- target: dev
+- workspace ID: <numeric-workspace-id>
+- SQL warehouse ID: <warehouse-id>
+
+Use the Databricks skills for CLI, DABs, Jobs, and Apps. Never use another
+profile. First validate the bundle with --strict. Then deploy the bundle, run
+the jiig_job resource and wait for all three SQL tasks to succeed, and finally
+run the job_dependency_graph app resource. Verify that shared.jiig_dev contains
+lineage_edges, dag_relationships, and jiig_dashboard, and confirm that the app
+is RUNNING with ACTIVE compute. If authentication expires, renew only the
+specified profile and continue. Report the Job run URL and app URL.
+```
+
+For production, replace `target: dev` with `target: prod` and verify the intended catalog/schema and schedule before approving the deployment.
+
+#### Redeploy app code after initialization
+
+Once the three output tables already exist, use this shorter prompt for app-only updates:
+
+```text
+Deploy the current JIIG app code to the existing Databricks deployment using
+profile <profile>, target <target>, workspace ID <numeric-workspace-id>, and SQL
+warehouse ID <warehouse-id>. Do not change profiles or recreate data resources.
+Use databricks apps deploy, wait for completion, and verify that the app status
+is RUNNING, compute is ACTIVE, and the active deployment succeeded. Return the
+app URL. If the app reports a missing snapshot table, run jiig_job and verify
+the three JIIG tables before retrying the app.
+```
+
+#### Diagnose a failed deployment or startup
+
+```text
+Diagnose the current JIIG deployment in Databricks profile <profile> and target
+<target>. Do not modify or redeploy anything until you identify the cause.
+Check the bundle summary, latest jiig_job run and task outputs, existence and
+permissions of the three JIIG tables, app status, configured warehouse, active
+deployment, and recent app/system logs. Explain the root cause, propose the
+smallest safe fix, ask before destructive actions, then verify the fix end to
+end.
+```
+
+The client should always pass `--profile <profile>` and `-t <target>` to Databricks commands. Treat workspace IDs, warehouse IDs, catalogs, schemas, and production deployment approval as user-supplied decisions rather than values to guess.
 
 ## Required permissions
 
