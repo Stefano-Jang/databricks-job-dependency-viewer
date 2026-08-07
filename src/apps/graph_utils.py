@@ -38,6 +38,55 @@ def downstream_hops(forward: dict, root: str, max_depth: int) -> dict:
     return hops
 
 
+def downstream_paths(forward: dict, root: str, max_depth: int) -> dict:
+    """Return the shortest causal path from root to every downstream node."""
+    paths = {
+        root: {
+            "hop": 0,
+            "node_path": [root],
+            "edge_tables": [],
+            "edge_kinds": [],
+        }
+    }
+    queue = deque([root])
+    while queue:
+        node = queue.popleft()
+        current = paths[node]
+        if current["hop"] >= max_depth:
+            continue
+        for edge in forward.get(node, []):
+            target = edge["target"]
+            if target in paths:
+                continue
+            tables = [table.strip() for table in edge["tables"].split(", ") if table.strip()]
+            paths[target] = {
+                "hop": current["hop"] + 1,
+                "node_path": current["node_path"] + [target],
+                "edge_tables": current["edge_tables"] + [tables],
+                "edge_kinds": current["edge_kinds"] + [edge["kind"]],
+            }
+            queue.append(target)
+    paths.pop(root, None)
+    return paths
+
+
+def upstream_hops(reverse: dict, root: str, max_depth: int) -> dict:
+    """BFS from root following reverse edges; root is excluded."""
+    hops = {root: 0}
+    queue = deque([root])
+    while queue:
+        node = queue.popleft()
+        if hops[node] >= max_depth:
+            continue
+        for edge in reverse.get(node, []):
+            source = edge["source"]
+            if source not in hops:
+                hops[source] = hops[node] + 1
+                queue.append(source)
+    hops.pop(root, None)
+    return hops
+
+
 def upstream_neighbors(reverse: dict, node_ids: set) -> set:
     """Direct (1-hop) upstream neighbors of the given nodes, excluding themselves."""
     ups = set()
@@ -68,7 +117,13 @@ def classify_incidents(failed_ids: list, forward: dict, max_depth: int,
         }
     for fid, info in result.items():
         for other in info["downstream_failed"]:
-            result[other]["is_cascade"] = True
+            if not failed_times:
+                result[other]["is_cascade"] = True
+                continue
+            upstream_time = pd.to_datetime(failed_times.get(fid), utc=True, errors="coerce")
+            downstream_time = pd.to_datetime(failed_times.get(other), utc=True, errors="coerce")
+            if pd.isna(upstream_time) or pd.isna(downstream_time) or upstream_time <= downstream_time:
+                result[other]["is_cascade"] = True
 
     if failed_times:
         reach = {fid: set(result[fid]["downstream_failed"]) for fid in result}
@@ -86,19 +141,23 @@ def classify_incidents(failed_ids: list, forward: dict, max_depth: int,
 
 
 def critical_tables(forward: dict, root: str, affected: dict, top_n: int = 10) -> list:
-    """Tables on the edges inside the impact subtree, ranked by how many
-    affected entities they feed."""
+    """Rank tables by unique affected entities reachable through each table."""
     impacted = set(affected) | {root}
-    counts = {}
+    exposure = {}
     for src in impacted:
         for edge in forward.get(src, []):
             if edge["target"] not in impacted or not edge["tables"]:
                 continue
+            descendants = set(downstream_hops(forward, edge["target"], len(impacted)))
+            exposed = ({edge["target"]} | descendants) & impacted
             for tbl in edge["tables"].split(", "):
                 tbl = tbl.strip()
                 if tbl:
-                    counts[tbl] = counts.get(tbl, 0) + 1
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+                    exposure.setdefault(tbl, set()).update(exposed)
+    ranked = sorted(
+        ((table, len(nodes)) for table, nodes in exposure.items()),
+        key=lambda item: (-item[1], item[0]),
+    )
     return ranked[:top_n]
 
 
@@ -116,22 +175,23 @@ def owners_of(nodes_df: pd.DataFrame, node_ids: set) -> list:
     return sorted(owners)
 
 
-def top_nodes_by_degree(nodes_df: pd.DataFrame, edges_df: pd.DataFrame, cap: int) -> set:
-    """Node ids to keep for the capped full-graph view: failed nodes always
-    survive, the rest ranked by degree."""
-    failed = set(nodes_df[nodes_df["is_failed"] == True]["id"].astype(str))
-    degree = (
-        pd.concat([edges_df["source_id"], edges_df["target_id"]])
-        .astype(str).value_counts()
-    )
-    keep = set(failed)
-    for nid in degree.index:
-        if len(keep) >= cap:
-            break
-        keep.add(str(nid))
-    if len(keep) < cap:
-        for nid in nodes_df["id"].astype(str):
-            if len(keep) >= cap:
+def owners_by_kind(nodes_df: pd.DataFrame, node_ids: set) -> dict:
+    """Map consumer node type -> list of owner emails for notifications.
+
+    Allows notifications to be grouped per consumer kind (e.g., separate wording
+    for dashboard owners vs job owners).
+    """
+    if nodes_df is None or nodes_df.empty or not node_ids:
+        return {}
+    sub = nodes_df[nodes_df["id"].astype(str).isin({str(n) for n in node_ids})]
+    result = {}
+    for row in sub.itertuples(index=False):
+        ntype = str(getattr(row, "type", "unknown")).lower()
+        owner = None
+        for candidate in (getattr(row, "run_as_email", None), getattr(row, "creator_email", None)):
+            if candidate is not None and pd.notna(candidate) and str(candidate):
+                owner = str(candidate)
                 break
-            keep.add(nid)
-    return keep
+        if owner:
+            result.setdefault(ntype, set()).add(owner)
+    return {k: sorted(v) for k, v in result.items()}

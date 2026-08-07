@@ -5,14 +5,21 @@ bundle:
   uuid: 2cc4ebc9-744c-422b-b6ba-864288ec70c0
 
 variables:
-  # The "warehouse_id" variable is used to reference the warehouse used by the dashboard.
+  # The SQL warehouse that runs the job tasks, the dashboard and the app.
+  # REQUIRED: set this to a warehouse that exists in your workspace. The name is
+  # resolved to an id at deploy time, so a wrong name fails the deploy with a
+  # lookup error rather than failing silently later.
+  #   databricks warehouses list --profile <your-profile>
   warehouse_id:
     lookup:
-      # Replace this with the name of your SQL warehouse.
-      warehouse: dbdemos-shared-endpoint
+      warehouse: your-sql-warehouse-name
+  # REQUIRED: every system-table query filters on this. It must be the numeric
+  # id of the workspace you are analyzing -- a wrong value returns zero rows
+  # instead of an error, which looks like "no failures" rather than a
+  # misconfiguration. Find it in the workspace URL (?o=<workspace_id>) or via
+  # `databricks current-user me` -> workspace host, then Admin Settings.
   workspace_id:
-    description: workspace id
-    default: 1444828305810485
+    description: Numeric workspace id used to filter all system tables
   account_name:
     description: Customer Name
     default: MyCompany
@@ -23,7 +30,7 @@ variables:
     # Per-target schema keeps dev/prod isolated and lets the dashboard reference
     # tables by bare name (resolved via dataset_catalog/dataset_schema at deploy).
     description: Base schema (per deployment target)
-    default: stefano_jiig_${bundle.target}
+    default: jiig_${bundle.target}
   failure_lookback_days:
     description: Failures within this window (days) are analyzed
     default: 7
@@ -41,6 +48,19 @@ variables:
     # query; catalog/schema are injected via dataset_catalog/dataset_schema.
     description: Table for dashboard information
     default: ${var.jiig_catalog}.${var.jiig_schema}.jiig_dashboard
+  lineage_edge_table:
+    description: Shared dependency edge table (single source of truth for edges)
+    default: ${var.jiig_catalog}.${var.jiig_schema}.lineage_edges
+  max_table_fanout:
+    description: |
+      A table written by more than this many distinct producers is treated as a shared sink,
+      not a dependency. On a large demo workspace, hub tables (platform monitoring sinks plus
+      user scratch tables) inflated the edge set from ~8k to ~873k via a writers x readers
+      cartesian product. Capping at 20 excluded only 46 tables.
+    default: 20
+  include_consumer_kinds:
+    description: Extra downstream consumer kinds beyond JOB/PIPELINE (e.g. DASHBOARD,QUERY,GENIE,ALERT). These are read-only leaves that consume tables but never produce them.
+    default: DASHBOARD,QUERY,GENIE,ALERT
 
 include:
   - resources/*.yml
@@ -54,9 +74,6 @@ targets:
     # See also https://docs.databricks.com/dev-tools/bundles/deployment-modes.html.
     mode: development
     default: true
-    workspace:
-      host: https://e2-demo-field-eng.cloud.databricks.com
-      root_path: /Workspace/Users/stefano.jang@databricks.com/.bundle/${bundle.name}/${bundle.target}
     presets:
       name_prefix: '[DEV-JIIG-${workspace.current_user.short_name}]'
       pipelines_development: true
@@ -70,10 +87,6 @@ targets:
 
   prod:
     mode: production
-    workspace:
-      host: https://e2-demo-field-eng.cloud.databricks.com
-      # We explicitly deploy to /Workspace/Users/stefano.jang@databricks.com to make sure we only have a single copy.
-      root_path: /Workspace/Users/stefano.jang@databricks.com/.bundle/${bundle.name}/${bundle.target}
     presets:
       name_prefix: '[PRD-JIIG]'
       pipelines_development: false
@@ -84,6 +97,3 @@ targets:
         project: jiig
         creator: databricks
         environment: prd
-    permissions:
-      - user_name: stefano.jang@databricks.com
-        level: CAN_MANAGE

@@ -1,5 +1,5 @@
 # The main job for jiig.
-# Both tasks read native system tables only — no auxiliary notebooks needed.
+# All three tasks read native system tables only — no auxiliary notebooks needed.
 resources:
   jobs:
     jiig_job:
@@ -18,6 +18,12 @@ resources:
           default: ${var.jiig_dag_table}
         - name: dashboard_table
           default: ${var.dashboard_table}
+        - name: lineage_edge_table
+          default: ${var.lineage_edge_table}
+        - name: max_table_fanout
+          default: ${var.max_table_fanout}
+        - name: include_consumer_kinds
+          default: ${var.include_consumer_kinds}
 
       schedule:
         quartz_cron_expression: 0 0/30 * * * ?
@@ -28,12 +34,21 @@ resources:
       #    - your_email@example.com
 
       tasks:
+        - task_key: jiig_lineage_edges
+          sql_task:
+            file:
+              path: ../src/job/jiig-lineage-edges.sql
+              source: WORKSPACE
+            warehouse_id: ${var.warehouse_id}
+
         - task_key: jiig_dag_table
           sql_task:
             file:
               path: ../src/job/jiig-dag-table-creation.sql
               source: WORKSPACE
             warehouse_id: ${var.warehouse_id}
+          depends_on:
+            - task_key: jiig_lineage_edges
 
         - task_key: jiig_dashboard_table
           sql_task:
@@ -41,3 +56,5 @@ resources:
               path: ../src/job/jiig-dashboard-table-creation.sql
               source: WORKSPACE
             warehouse_id: ${var.warehouse_id}
+          depends_on:
+            - task_key: jiig_lineage_edges

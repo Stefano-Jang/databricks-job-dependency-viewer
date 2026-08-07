@@ -1,175 +1,236 @@
-# JIIG
+# JIIG 2.0 — Lakeflow Incident Intelligence
 
-JIIG denotes "Job Incidents Identification Graph". <br>
-A single Job may generate multiple tables that serve as inputs for other downstream Jobs. When a failure occurs, administrators must determine the downstream dependencies and notify affected teams. Currently, admin teams identify failed Jobs and manually trace their downstream sub-Jobs before notifying the respective owners via Slack. This manual failure-handling process typically takes more than hours, consuming significant time and resources. <br>
-The goal of this project is to automate the detection and impact analysis of Lakeflow Job and Pipeline (Lakeflow Spark Declarative Pipelines, SDP) failures using system tables and table lineage information. The solution also provides an incident-centric visualization of dependencies — representing Jobs and Pipelines as nodes and their relationships as edges — through a Databricks App, enabling teams to quickly understand the scope of an incident.
+When a Databricks Lakeflow Job or Pipeline fails, the operational question is not only **“what failed?”** It is **“which downstream Jobs, Pipelines, dashboards, Genie spaces, queries, and alerts may now be stale—and who needs to act?”**
 
-Everything is computed from **native system tables only** — no auxiliary notebooks, no user-ID mapping tables, and no event-log scanning jobs are required.
+JIIG turns native Databricks system-table lineage into an incident command surface:
 
-| Source | Used for |
+- Prioritizes open failures by downstream blast radius.
+- Distinguishes likely root incidents from likely cascades using multi-hop paths and failure timing.
+- Shows the intermediate tables and triggers that explain every impact path.
+- Identifies downstream owners and produces a ready-to-share incident brief.
+- Ranks dependency hubs and authorities so teams can find systemic risk before an outage.
+- Provides a focused upstream/downstream explorer instead of an unreadable workspace hairball.
+
+No auxiliary mapping table, event-log scanner, or notebook is required.
+
+## Product experience
+
+### Incident Command
+
+The highest-impact open incident is selected automatically. Responders immediately see exposure, affected business surfaces, owners, the causal graph, and table-level evidence.
+
+![JIIG Incident Command](resources/figures/jiig_incident_command.png)
+
+### Dependency Intelligence
+
+Hub and authority views explain which assets have the broadest downstream reach and which concentrate the most inbound dependency risk.
+
+![JIIG Dependency Intelligence](resources/figures/jiig_dependency_intelligence.png)
+
+The screenshots use the repository's anonymous demo fixture. They contain no customer or employee data.
+
+## What JIIG provides
+
+| Surface | Purpose |
 |---|---|
-| `system.lakeflow.jobs` / `system.lakeflow.pipelines` | Entity metadata (SCD2, latest row), owner emails (`creator_user_name`, `run_as_user_name`) |
-| `system.lakeflow.job_run_timeline` | Job failures (`FAILED`, `ERROR`, `TIMED_OUT`) and activity |
-| `system.lakeflow.pipeline_update_timeline` | Pipeline (SDP) update/refresh failures (`result_state = 'FAILED'` on `REFRESH` / `FULL_REFRESH`), job→pipeline trigger links |
-| `system.access.table_lineage` | Table-level dependency edges (via `entity_metadata`) |
+| **Incident Command** | Open incident queue, likely root/cascade evidence, scoped blast radius, causal graph, affected assets, owners, critical data contracts, incident brief |
+| **Dependency Intelligence** | Top hubs, top authorities, dependency position map, shared-write governance signals |
+| **Dependency Explorer** | Search any asset and inspect a connected upstream/downstream neighborhood and causal paths |
+| **Operations** | Snapshot freshness, ownership gaps, entity coverage, shared-table review queue |
+| **AI/BI dashboard** | Managed companion view over open failure-to-impact pairs for workspace reporting |
 
-The dashboard provides,
-- Failed Job or Pipeline IDs, Name, failure detail (termination code / failed update)
-- Affected Job or Pipeline IDs, Name, creator/run_as email, affected_tables
-- **Multi-hop impact**: `hop_distance` (how many dependency hops away) and `impact_path` (e.g., `Job A -> Pipeline B -> Job C`) — a failure's transitive blast radius, not just direct consumers
-- Two kinds of dependency edges: **table dependency** (producer writes a table the consumer reads) and **job→pipeline trigger** (a job task starts a pipeline update)
+## Incident semantics
 
-- This project is DABs (**Databricks Asset Bundles**)
-- For information on using **Databricks Asset Bundles in the workspace**, see: [Databricks Asset Bundles in the workspace](https://docs.databricks.com/aws/en/dev-tools/bundles/workspace-bundles)
-- For details on the **Databricks Asset Bundles format** used in this asset bundle, see: [Databricks Asset Bundles Configuration reference](https://docs.databricks.com/aws/en/dev-tools/bundles/reference)
+JIIG 2.0 makes the following distinctions explicit:
 
+- **Open incident**: the latest Job run or Pipeline refresh inside the lookback window is failed. A later successful run clears the active incident.
+- **Likely root**: no earlier failed upstream reaches this failure within the selected depth.
+- **Likely cascade**: an earlier failed upstream reaches this failure, including through healthy intermediate assets.
+- **At risk**: a downstream dependency exists in the lineage window. This is potential stale-data exposure, not proof that every output table was corrupted.
+- **Business surface**: a terminal Dashboard, Genie space, SQL query, or alert that may expose stale results to users.
 
-The network graph App is **incident-centric**:
-- Incident list of failed entities, sorted by blast radius, with **ROOT CAUSE / CASCADE** classification (a failure sitting downstream of another failure is flagged as a cascade)
-- Select an incident to render only its impact subgraph (selected failure + downstream up to N hops + direct upstream context) — the full graph is never loaded into the canvas, so it stays responsive at any workspace size
-- Insight panel per incident: affected entities by hop, critical tables (feeding most consumers), owners to notify (copyable), and a ready-to-send notification draft
-- A capped "Full graph" overview tab (failed nodes always kept, the rest ranked by degree)
+Root/cascade classification is operational evidence, not automated root-cause proof. Confirm the failure and table state before remediation.
 
-![Incidents](resources/figures/jiig_app_incidents.png)
-![Graph](resources/figures/jiig_graph.png)
+## Architecture
 
-## Getting Started
-Before deploy, you should modify databricks.yml
-### Setting Up Databricks CLI
-The new Databricks CLI (v0.205+) is required — the legacy `pip install databricks-cli` package does not support `bundle` commands.
+The scheduled SQL job runs every 30 minutes and builds three Delta tables:
+
+```text
+system.access.table_lineage
+system.lakeflow.jobs / pipelines
+system.lakeflow.job_run_timeline
+system.lakeflow.pipeline_update_timeline
+                │
+                ▼
+lineage_edges
+  EDGE + SHARED_TABLE rows
+       ├──────────────────┐
+       ▼                  ▼
+dag_relationships       jiig_dashboard
+nodes, edges, ranks     open failure × affected asset
+       │                  │
+       ▼                  ▼
+JIIG App              AI/BI dashboard
+```
+
+| Output table | Purpose |
+|---|---|
+| `lineage_edges` | Canonical dependency, orchestration-trigger, and table-trigger edges; shared-write tables above the fan-out cap |
+| `dag_relationships` | Kind-qualified graph nodes/edges, failure state, snapshot timestamp, degrees, reach, hub rank, authority rank |
+| `jiig_dashboard` | Open failed entity × downstream affected entity pairs with hop distance, intermediate tables, path, and owner |
+
+See [`docs/architecture.md`](docs/architecture.md) for the full data contract and correctness rules.
+
+## Quick start
+
+### 1. Prerequisites
+
+- Databricks CLI `0.292.0` or later
+- A SQL warehouse
+- Access to the required system tables
+- A Unity Catalog catalog/schema where JIIG can create its output tables
+
 ```bash
-# Check current version (should be >= 0.205)
 databricks --version
-
-# Install or Update the CLI
-# macOS
-brew tap databricks/tap && brew install databricks
-# Linux/macOS (script)
-curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sh
-```
-See: [Install the Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install)
-
-### Log in to your Databricks workspace
-```bash
-databricks auth login --host https://your-workspace-url.cloud.databricks.com --profile your-profile-name
+databricks auth profiles
 ```
 
-### Deploying JIIG with DABs
-```bash
-# Deploy to dev environment
-databricks bundle deploy -t dev --profile your-profile-name
+Choose the intended profile explicitly for every command. JIIG never assumes a default workspace.
 
-# Or Deploy to prod environment
-databricks bundle deploy -t prod --profile your-profile-name
-```
+### 2. Configure bundle variables
 
-### Start App or Job
-```bash
-# Run the table-refresh job (dev)
-databricks bundle run jiig_job -t dev --profile your-profile-name
+Set the warehouse lookup name in `databricks.yml`:
 
-# Start the graph app (dev)
-databricks bundle run job_dependency_graph -t dev --profile your-profile-name
-
-# Same for prod with -t prod
-```
-
-### To check resources per target
-```bash
-# View summary for default target(dev)
-databricks bundle summary --profile your-profile-name
-
-# View summary for specific target
-databricks bundle summary -t prod --profile your-profile-name
-```
-
-## Variables in databricks.yml
 ```yaml
+variables:
   warehouse_id:
     lookup:
-      # Replace this with the name of your SQL warehouse.
-      warehouse: dbdemos-shared-endpoint
-  workspace_id:
-    description: workspace id
-    default: 1444828305810485
-  account_name:
-    description: Customer Name # Will be used for a dashboard title
-    default: MyCompany
-  jiig_catalog:   # Tables for dashboard and Graph will be stored under jiig_catalog
-    description: Base catalog
-    default: shared
-  jiig_schema:    # Per-target schema isolates dev/prod (created automatically)
-    description: Base schema (per deployment target)
-    default: stefano_jiig_${bundle.target}
-  failure_lookback_days:    # Failures within this window are analyzed
-    default: 7
-  lineage_lookback_days:    # Lineage within this window defines dependency edges
-    default: 30
-  impact_max_depth:         # Max downstream hops for impact analysis
-    default: 5
-  jiig_dag_table:       # Graph table (nodes + edges for the App)
-    default: ${var.jiig_catalog}.${var.jiig_schema}.dag_relationships
-  dashboard_table:      # Dashboard table (multi-hop failure impact pairs)
-    default: ${var.jiig_catalog}.${var.jiig_schema}.jiig_dashboard
+      warehouse: your-sql-warehouse-name
 ```
 
-### App configuration
-When deploying with DABs, the App environment (`DAG_TABLE_NAME`, `DATABRICKS_WAREHOUSE_ID`, `FAILURE_LOOKBACK_DAYS`) is set automatically from the bundle variables via the `config` block in `resources/jiig.apps.yml` — no manual editing required. <br>
-For manual (non-bundle) deployments only, uncomment and set the values in `src/apps/app.yaml`:
-```yaml
-  - name: DAG_TABLE_NAME
-    value: "your_catalog.your_schema.dag_relationships_dev"
-  - name: DATABRICKS_WAREHOUSE_ID
-    value: "your_warehouse_id"
-  - name: FAILURE_LOOKBACK_DAYS
-    value: "7"
-```
-- You can find warehouse id in COMPUTE > SQL WAREHOUSE
-![warehouse_id](resources/figures/jiig_warehouse_id.png)
+`workspace_id` has no default and is intentionally required. Obtain the numeric workspace ID from the workspace URL (`?o=<workspace_id>`) or workspace admin settings.
 
-### Dashboard configuration
-No post-deploy manual steps are required. The dashboard dataset references the table by bare name (`jiig_dashboard`), and the bundle injects the catalog/schema at deploy time via the `dataset_catalog` / `dataset_schema` fields in `resources/jiig.dashboard.yml`. Changing `jiig_catalog` / `jiig_schema` bundle variables is enough — see [bundle dashboard resource reference](https://docs.databricks.com/aws/en/dev-tools/bundles/resources). (Requires a recent Databricks CLI; tested with v0.297.)
+Other commonly changed variables:
 
-### Project Structure
+| Variable | Default | Purpose |
+|---|---:|---|
+| `jiig_catalog` | `shared` | Output catalog |
+| `jiig_schema` | `jiig_${bundle.target}` | Per-target output schema |
+| `failure_lookback_days` | `7` | Run/update history used for active incident state and failure count |
+| `lineage_lookback_days` | `30` | Observed lineage window used to define dependencies |
+| `impact_max_depth` | `5` | Maximum downstream traversal depth; keep at `1–5` |
+| `max_table_fanout` | `20` | Writer cap above which a table is treated as a shared-write governance signal |
+| `include_consumer_kinds` | `DASHBOARD,QUERY,GENIE,ALERT` | Terminal business surfaces included in impact analysis |
+
+### 3. Validate, deploy, and refresh
+
+```bash
+databricks bundle validate -t dev \
+  --profile <profile> \
+  --var="workspace_id=<numeric-workspace-id>"
+
+databricks bundle deploy -t dev \
+  --profile <profile> \
+  --var="workspace_id=<numeric-workspace-id>"
+
+databricks bundle run jiig_job -t dev \
+  --profile <profile> \
+  --var="workspace_id=<numeric-workspace-id>"
+
+databricks bundle run job_dependency_graph -t dev \
+  --profile <profile> \
+  --var="workspace_id=<numeric-workspace-id>"
 ```
+
+The development target pauses schedules by default. The production target enables the 30-minute schedule after a successful production deployment.
+
+## Required permissions
+
+The deployment identity needs:
+
+- `CAN USE` on the SQL warehouse.
+- `SELECT` on `system.access.table_lineage`.
+- `SELECT` on the required `system.lakeflow` system tables.
+- `USE CATALOG` and `USE SCHEMA` on the output location.
+- `CREATE SCHEMA` when the configured schema does not exist.
+- `CREATE TABLE`, `MODIFY`, and `SELECT` on the JIIG output schema/tables.
+
+App users need access to the deployed app, SQL warehouse, catalog/schema, and `SELECT` on `dag_relationships`. The app uses the forwarded user token when available and otherwise falls back to the app service principal, so administrators must scope both identities deliberately.
+
+## Local UI demo
+
+The explicit demo mode uses a small anonymous graph and never connects to Databricks:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r src/apps/requirements.txt
+
+PYTHONPATH=src/apps \
+JIIG_DEMO_MODE=true \
+streamlit run src/apps/app.py
+```
+
+`JIIG_DEMO_MODE` is disabled by default and is not set in the bundle deployment.
+
+## Correctness and scale safeguards
+
+- Only `direct_access = true` lineage records create direct dependency edges.
+- Node IDs are canonical `KIND:id` values, preventing Job/Pipeline/consumer ID collisions.
+- One run/update is counted once even when its timeline spans multiple rows.
+- An incident remains open only when the latest run/update is failed.
+- Jobs and Pipelines missing from current metadata remain visible when run history or lineage proves they exist.
+- Sentinel trigger IDs such as `SQL_SCHEDULE` are excluded.
+- Parallel dependency/trigger edges are merged before traversal.
+- Shared-write tables above `max_table_fanout` are reported separately instead of creating a writers × readers edge explosion.
+- The app loads scoped incident subgraphs; it does not load the full workspace graph during incident triage.
+
+## Known limitations
+
+- Impact is inferred from observed entity-to-table lineage. JIIG does not currently identify the exact failed task output within a multi-task Job, so exposure is intentionally labeled potential.
+- Lineage is asynchronous and can lag behind workload activity.
+- Monthly or quarterly dependencies outside `lineage_lookback_days` may be absent.
+- Configured Run Job dependencies are not included unless they also appear through observed table lineage or supported trigger metadata.
+- `system.lakeflow.pipelines` and `system.lakeflow.pipeline_update_timeline` may be in preview depending on workspace/cloud rollout.
+- `max_table_fanout` is a heuristic and can exclude a legitimate wide-write dependency table.
+- System metadata may expose a principal ID rather than a human email; unresolved ownership is shown as an explicit operational gap.
+- Hub rank uses bounded downstream reach and direct out-degree. Authority rank uses inbound degree. They are structural signals, not business-criticality scores.
+
+## Project structure
+
+```text
 .
 ├── databricks.yml
-├── README.md
+├── docs
+│   ├── architecture.md
+│   └── product-review.md
 ├── resources
 │   ├── figures
-│   │   └── *.png
+│   │   ├── jiig_incident_command.png
+│   │   └── jiig_dependency_intelligence.png
 │   ├── jiig.apps.yml
 │   ├── jiig.dashboard.yml
 │   └── jiig.job.yml
-├── scratch
-│   └── README.md
-└── src
-    ├── apps
-    │   ├── app.py            # Incident-centric Streamlit UI
-    │   ├── app.yaml          # Fallback config for manual deploys
-    │   ├── conn.py           # Warehouse connection (OBO with SP fallback)
-    │   ├── graph_utils.py    # BFS / blast radius / insight helpers
-    │   └── requirements.txt
-    ├── dashboard
-    │   └── jiig-dashboard.lvdash.json
-    └── job
-        ├── jiig-dag-table-creation.sql        # Graph nodes & edges
-        └── jiig-dashboard-table-creation.sql  # Multi-hop impact pairs
+├── scripts
+│   └── capture_demo_screenshots.py
+├── src
+│   ├── apps
+│   │   ├── app.py
+│   │   ├── conn.py
+│   │   ├── demo_data.py
+│   │   ├── graph_utils.py
+│   │   └── run_app.py
+│   ├── dashboard
+│   │   └── jiig-dashboard.lvdash.json
+│   └── job
+│       ├── jiig-lineage-edges.sql
+│       ├── jiig-dag-table-creation.sql
+│       └── jiig-dashboard-table-creation.sql
+└── tests
+    ├── test_demo_data.py
+    └── test_graph_utils.py
 ```
 
-### Requirements and Operation
-* This is an administration service, **WORKSPACE_ADMIN** permission is required.
-   * If not, permission to read the system catalog is required (`system.lakeflow`, `system.access`).
-* System schemas `system.lakeflow` and `system.access` must be enabled on the metastore. Note that `system.lakeflow.pipelines` and `system.lakeflow.pipeline_update_timeline` are in Public Preview.
-* A SQL warehouse is required (both job tasks are SQL tasks; serverless compute is no longer needed).
-* Pipeline (SDP) failure detection now comes directly from `system.lakeflow.pipeline_update_timeline` — the LDP event-log consolidator notebook and the user-ID mapping notebook from earlier versions have been removed.
-   * Owner emails come from `creator_user_name` / `run_as_user_name` in the system tables. Entities not modified since ~Dec 2025 may show a numeric ID instead (the columns are not backfilled); the value falls back to the raw ID in that case.
-* Failure-detection tables are regenerated every 30 minutes by the schedule; run the jiig job manually to refresh sooner.
-* On-behalf-of user authorization for Apps should be enabled
-   ![obo](resources/figures/jiig_obo.png)
+## Disclaimer
 
-### Contribution
-We are waiting your pull requests. Please leave any idea about dashboard and graph.
-
-### Disclaimer
-The main author (stefano-jang) is a Solutions Architect at Databricks. However, this project is not part of any official company work and was initiated solely as a personal good-will effort. It does not come with any guaranteed SLA, nor does it provide official support. If you intend to use this code in your production environment, please review it thoroughly and assume full responsibility for its use.
+JIIG is a community project and is not an official Databricks product. Review its SQL, permissions, operational semantics, and incident process before production use. No SLA or official support is provided.
