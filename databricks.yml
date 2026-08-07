@@ -20,7 +20,6 @@ variables:
   # `databricks current-user me` -> workspace host, then Admin Settings.
   workspace_id:
     description: Numeric workspace id used to filter all system tables
-    default: "0000000000000000"
   account_name:
     description: Customer Name
     default: MyCompany
@@ -75,9 +74,6 @@ targets:
     # See also https://docs.databricks.com/dev-tools/bundles/deployment-modes.html.
     mode: development
     default: true
-    workspace:
-      host: https://e2-demo-field-eng.cloud.databricks.com
-      root_path: /Workspace/Users/stefano.jang@databricks.com/.bundle/${bundle.name}/${bundle.target}
     presets:
       name_prefix: '[DEV-JIIG-${workspace.current_user.short_name}]'
       pipelines_development: true
@@ -91,10 +87,6 @@ targets:
 
   prod:
     mode: production
-    workspace:
-      host: https://e2-demo-field-eng.cloud.databricks.com
-      # We explicitly deploy to /Workspace/Users/stefano.jang@databricks.com to make sure we only have a single copy.
-      root_path: /Workspace/Users/stefano.jang@databricks.com/.bundle/${bundle.name}/${bundle.target}
     presets:
       name_prefix: '[PRD-JIIG]'
       pipelines_development: false
@@ -105,6 +97,3 @@ targets:
         project: jiig
         creator: databricks
         environment: prd
-    permissions:
-      - user_name: stefano.jang@databricks.com
-        level: CAN_MANAGE

@@ -1,5 +1,5 @@
-streamlit>=1.38
-st-link-analysis>=0.4.0
-databricks-sql-connector
-databricks-sdk
-pandas
+streamlit>=1.50,<2
+st-link-analysis>=0.4,<1
+databricks-sql-connector>=3.4,<5
+databricks-sdk>=0.30,<1
+pandas>=2.1,<3

@@ -5,8 +5,11 @@ import streamlit as st
 from databricks import sql
 from databricks.sdk.core import Config
 
-assert os.getenv("DATABRICKS_WAREHOUSE_ID"), "DATABRICKS_WAREHOUSE_ID must be set in app.yaml or environment."
-assert os.getenv("DAG_TABLE_NAME"), "DAG_TABLE_NAME must be set in app.yaml or environment."
+DEMO_MODE = os.getenv("JIIG_DEMO_MODE", "").lower() in {"1", "true", "yes"}
+
+if not DEMO_MODE:
+    assert os.getenv("DATABRICKS_WAREHOUSE_ID"), "DATABRICKS_WAREHOUSE_ID must be set in app.yaml or environment."
+    assert os.getenv("DAG_TABLE_NAME"), "DAG_TABLE_NAME must be set in app.yaml or environment."
 
 DAG_TABLE_NAME = os.getenv("DAG_TABLE_NAME")
 WAREHOUSE_ID = os.getenv("DATABRICKS_WAREHOUSE_ID")
@@ -17,18 +20,25 @@ IMPACT_MAX_DEPTH = int(os.getenv("IMPACT_MAX_DEPTH", "5"))
 FAILURE_LOOKBACK_DAYS = int(os.getenv("FAILURE_LOOKBACK_DAYS", "7"))
 
 NODE_COLUMNS = [
-    "id", "type", "subtype", "name", "description", "creator_email", "run_as_email",
+    "id", "entity_id", "type", "subtype", "name", "description", "creator_email", "run_as_email",
     "is_failed", "last_failed_time", "first_failed_time", "failure_count",
-    "failure_detail", "last_activity_time", "created_time", "status",
-    "in_degree", "out_degree", "downstream_reach", "criticality_rank",
+    "failure_detail", "last_activity_time", "created_time", "status", "snapshot_time",
+    "in_degree", "out_degree", "downstream_reach", "criticality_rank", "hub_rank", "authority_rank",
 ]
 EDGE_COLUMNS = ["id", "type", "source_id", "target_id", "connecting_tables", "edge_table_count", "edge_kinds"]
 SHARED_TABLE_COLUMNS = ["id", "name", "writer_count"]
 # The Insights tab needs identity plus ranking metrics, not the full node row.
 OVERVIEW_COLUMNS = [
-    "id", "type", "subtype", "name", "description", "creator_email", "run_as_email",
-    "is_failed", "last_failed_time", "failure_count", "downstream_reach", "criticality_rank",
+    "id", "entity_id", "type", "subtype", "name", "description", "creator_email", "run_as_email",
+    "is_failed", "last_failed_time", "failure_count", "in_degree", "out_degree",
+    "downstream_reach", "criticality_rank", "hub_rank", "authority_rank",
 ]
+
+
+def _demo_data():
+    import demo_data
+
+    return demo_data
 
 
 def _user_token():
@@ -41,6 +51,8 @@ def _user_token():
 
 def current_user_key() -> str:
     """Identity used to partition the data cache per user (OBO isolation)."""
+    if DEMO_MODE:
+        return "demo"
     try:
         return (st.context.headers.get("X-Forwarded-Email")
                 or st.context.headers.get("X-Forwarded-User")
@@ -77,8 +89,11 @@ def _escape_sql_string(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
-NODE_TIME_COLUMNS = ("last_failed_time", "first_failed_time", "last_activity_time", "created_time")
-NODE_INT_COLUMNS = ("failure_count", "in_degree", "out_degree", "downstream_reach", "criticality_rank")
+NODE_TIME_COLUMNS = ("last_failed_time", "first_failed_time", "last_activity_time", "created_time", "snapshot_time")
+NODE_INT_COLUMNS = (
+    "failure_count", "in_degree", "out_degree", "downstream_reach",
+    "criticality_rank", "hub_rank", "authority_rank",
+)
 
 
 def _coerce_nodes(df: pd.DataFrame) -> pd.DataFrame:
@@ -118,12 +133,14 @@ def load_incidents(user_key: str, window_hours: float):
 
     user_key keeps the cache per-user and window_hours keys the result on time window.
     """
+    if DEMO_MODE:
+        return _demo_data().load_incidents(window_hours)
     since_expr = f"TIMESTAMPADD(HOUR, -{float(window_hours)}, CURRENT_TIMESTAMP())"
     query = f"""
-        SELECT id, type, subtype, name, description, creator_email, run_as_email,
+        SELECT id, entity_id, type, subtype, name, description, creator_email, run_as_email,
                is_failed, last_failed_time, first_failed_time, failure_count,
-               failure_detail, last_activity_time, created_time, status,
-               in_degree, out_degree, downstream_reach, criticality_rank
+               failure_detail, last_activity_time, created_time, status, snapshot_time,
+               in_degree, out_degree, downstream_reach, criticality_rank, hub_rank, authority_rank
         FROM {DAG_TABLE_NAME}
         WHERE result_type = 'NODES'
           AND is_failed = true
@@ -143,6 +160,8 @@ def load_subgraph(user_key: str, root_id: str, depth: int):
 
     Expands hops in SQL (fixed-depth joins) so browser never receives full edge set.
     """
+    if DEMO_MODE:
+        return _demo_data().load_subgraph(root_id, depth)
     root_id_safe = _escape_sql_string(root_id)
     hops = max(1, min(int(depth), IMPACT_MAX_DEPTH))
     # One CTE per hop, generated to the requested depth. Fixed-depth joins keep
@@ -182,10 +201,10 @@ def load_subgraph(user_key: str, root_id: str, depth: int):
             UNION SELECT id FROM downstream
             UNION SELECT id FROM upstream
         )
-        SELECT id, type, subtype, name, description, creator_email, run_as_email,
+        SELECT id, entity_id, type, subtype, name, description, creator_email, run_as_email,
                is_failed, last_failed_time, first_failed_time, failure_count,
-               failure_detail, last_activity_time, created_time, status,
-               in_degree, out_degree, downstream_reach, criticality_rank
+               failure_detail, last_activity_time, created_time, status, snapshot_time,
+               in_degree, out_degree, downstream_reach, criticality_rank, hub_rank, authority_rank
         FROM {DAG_TABLE_NAME}
         WHERE result_type = 'NODES' AND id IN (SELECT id FROM all_ids)
     """
@@ -211,9 +230,12 @@ def load_subgraph(user_key: str, root_id: str, depth: int):
 @st.cache_data(ttl=300)
 def load_overview(user_key: str, limit: int = 50):
     """Top-N nodes by criticality_rank for the Insights tab."""
+    if DEMO_MODE:
+        return _demo_data().load_overview(limit)
     query = f"""
-        SELECT id, type, subtype, name, description, creator_email, run_as_email,
-               is_failed, last_failed_time, failure_count, downstream_reach, criticality_rank
+        SELECT id, entity_id, type, subtype, name, description, creator_email, run_as_email,
+               is_failed, last_failed_time, failure_count, in_degree, out_degree,
+               downstream_reach, criticality_rank, hub_rank, authority_rank
         FROM {DAG_TABLE_NAME}
         WHERE result_type = 'NODES'
         ORDER BY criticality_rank ASC
@@ -228,8 +250,100 @@ def load_overview(user_key: str, limit: int = 50):
 
 
 @st.cache_data(ttl=300)
+def load_leaders(user_key: str, dimension: str, limit: int = 10):
+    """Top hub or authority nodes, ranked server-side."""
+    if dimension not in {"hub", "authority"}:
+        raise ValueError("dimension must be 'hub' or 'authority'")
+    if DEMO_MODE:
+        return _demo_data().load_leaders(dimension, limit)
+    rank_column = "hub_rank" if dimension == "hub" else "authority_rank"
+    query = f"""
+        SELECT id, entity_id, type, subtype, name, description, creator_email, run_as_email,
+               is_failed, last_failed_time, failure_count, in_degree, out_degree,
+               downstream_reach, criticality_rank, hub_rank, authority_rank
+        FROM {DAG_TABLE_NAME}
+        WHERE result_type = 'NODES'
+        ORDER BY {rank_column} ASC
+        LIMIT {int(limit)}
+    """
+    df = query_databricks(query)
+    if df.empty:
+        return pd.DataFrame(columns=OVERVIEW_COLUMNS)
+    return _coerce_nodes(df)
+
+
+@st.cache_data(ttl=300)
+def load_incident_signals(user_key: str, failed_ids: tuple, depth: int):
+    """Depth-specific reach counts and failed-to-failed paths through any nodes."""
+    ids = tuple(str(value) for value in failed_ids if value is not None and str(value).strip())
+    if not ids:
+        return {}, pd.DataFrame(columns=EDGE_COLUMNS)
+    hops = max(1, min(int(depth), IMPACT_MAX_DEPTH))
+    if DEMO_MODE:
+        return _demo_data().load_incident_signals(ids, hops)
+
+    values = ", ".join(f"({_escape_sql_string(node_id)})" for node_id in ids)
+    hop_ctes = [
+        "h1 AS (SELECT DISTINCT f.id AS root, e.target_id AS node, 1 AS hop "
+        "FROM failed f JOIN edges e ON e.source_id = f.id)"
+    ]
+    unions = ["SELECT * FROM h1"]
+    for hop in range(2, hops + 1):
+        hop_ctes.append(
+            f"h{hop} AS (SELECT DISTINCT p.root, e.target_id AS node, {hop} AS hop "
+            f"FROM h{hop - 1} p JOIN edges e ON e.source_id = p.node "
+            "WHERE e.target_id <> p.root)"
+        )
+        unions.append(f"SELECT * FROM h{hop}")
+
+    query = f"""
+        WITH failed(id) AS (SELECT * FROM VALUES {values}),
+        edges AS (
+          SELECT source_id, target_id
+          FROM {DAG_TABLE_NAME}
+          WHERE result_type = 'EDGES'
+        ),
+        {', '.join(hop_ctes)},
+        reached AS ({' UNION ALL '.join(unions)})
+        SELECT 'REACH' AS result_type, root AS source_id,
+               CAST(NULL AS STRING) AS target_id, CAST(NULL AS INT) AS hop,
+               COUNT(DISTINCT node) AS visible_reach
+        FROM reached
+        GROUP BY root
+
+        UNION ALL
+
+        SELECT 'FAILED_PAIR', r.root, r.node, MIN(r.hop), CAST(NULL AS BIGINT)
+        FROM reached r
+        JOIN failed f ON f.id = r.node
+        WHERE r.root <> r.node
+        GROUP BY r.root, r.node
+    """
+    result = query_databricks(query)
+    reach = {
+        str(row.source_id): int(row.visible_reach)
+        for row in result[result["result_type"] == "REACH"].itertuples(index=False)
+    }
+    pairs = result[result["result_type"] == "FAILED_PAIR"]
+    if pairs.empty:
+        return reach, pd.DataFrame(columns=EDGE_COLUMNS)
+    pair_edges = pd.DataFrame({
+        "id": pairs["source_id"].astype(str) + "=>" + pairs["target_id"].astype(str),
+        "type": "dependency",
+        "source_id": pairs["source_id"].astype(str),
+        "target_id": pairs["target_id"].astype(str),
+        "connecting_tables": "",
+        "edge_table_count": 0,
+        "edge_kinds": None,
+    })
+    return reach, _coerce_edges(pair_edges)
+
+
+@st.cache_data(ttl=300)
 def load_shared_tables(user_key: str):
     """Shared (hub) tables and their writer counts."""
+    if DEMO_MODE:
+        return _demo_data().load_shared_tables()
     df = query_databricks(f"""
         SELECT id, name, writer_count
         FROM {DAG_TABLE_NAME}
@@ -250,13 +364,17 @@ def load_stats(user_key: str):
     lets the header metrics and the Insights tab render without the app ever
     loading the graph.
     """
+    if DEMO_MODE:
+        return _demo_data().load_stats()
     totals = query_databricks(f"""
         SELECT
           SUM(CASE WHEN result_type = 'NODES' THEN 1 ELSE 0 END)          AS total_nodes,
           SUM(CASE WHEN result_type = 'EDGES' THEN 1 ELSE 0 END)          AS total_edges,
           SUM(CASE WHEN result_type = 'SHARED_TABLES' THEN 1 ELSE 0 END)  AS shared_tables,
           SUM(CASE WHEN result_type = 'NODES' AND is_failed THEN 1 ELSE 0 END) AS failed_nodes,
-          MAX(CASE WHEN result_type = 'NODES' THEN last_activity_time END)     AS freshness
+          SUM(CASE WHEN result_type = 'NODES' AND type IN ('dashboard', 'genie', 'query', 'alert') THEN 1 ELSE 0 END) AS terminal_consumers,
+          SUM(CASE WHEN result_type = 'NODES' AND COALESCE(run_as_email, creator_email) IS NULL THEN 1 ELSE 0 END) AS owners_unresolved,
+          MAX(snapshot_time) AS freshness
         FROM {DAG_TABLE_NAME}
     """)
     by_type = query_databricks(f"""
@@ -276,34 +394,14 @@ def load_stats(user_key: str):
     # on a fresh deploy before the job has run. Coerce NaN to 0 explicitly --
     # `int(nan or 0)` raises, because NaN is truthy.
     row = totals.iloc[0] if not totals.empty else {}
-    for key in ("total_nodes", "total_edges", "shared_tables", "failed_nodes"):
+    for key in (
+        "total_nodes", "total_edges", "shared_tables", "failed_nodes",
+        "terminal_consumers", "owners_unresolved",
+    ):
         value = pd.to_numeric(row.get(key), errors="coerce")
         out[key] = 0 if pd.isna(value) else int(value)
     out["freshness"] = pd.to_datetime(row.get("freshness"), utc=True, errors="coerce")
     return out
-
-
-@st.cache_data(ttl=300)
-def load_failed_edges(user_key: str, failed_ids: tuple):
-    """Edges between failed entities only — the input to cascade classification.
-
-    Cascade detection only needs to know whether one failure sits downstream of
-    another, so this stays small no matter how large the workspace is.
-    """
-    # Drop nulls rather than stringifying them: str(None) would become the
-    # literal 'None' and silently match nothing.
-    ids = [str(i) for i in failed_ids if i is not None and str(i).strip()]
-    if not ids:
-        return pd.DataFrame(columns=EDGE_COLUMNS)
-    quoted = ",".join(_escape_sql_string(i) for i in ids)
-    df = query_databricks(f"""
-        SELECT id, type, source_id, target_id, connecting_tables, edge_table_count, edge_kinds
-        FROM {DAG_TABLE_NAME}
-        WHERE result_type = 'EDGES'
-          AND source_id IN ({quoted})
-          AND target_id IN ({quoted})
-    """)
-    return _coerce_edges(df)
 
 
 @st.cache_data(ttl=300)
@@ -315,11 +413,13 @@ def load_graph(user_key: str):
 
     user_key keeps the cache per-user.
     """
+    if DEMO_MODE:
+        return _demo_data().load_graph()
     query = f"""
-        SELECT result_type, id, type, subtype, name, description, creator_email, run_as_email,
+        SELECT result_type, id, entity_id, type, subtype, name, description, creator_email, run_as_email,
                is_failed, last_failed_time, first_failed_time, failure_count,
-               failure_detail, last_activity_time, created_time, status,
-               in_degree, out_degree, downstream_reach, criticality_rank,
+               failure_detail, last_activity_time, created_time, status, snapshot_time,
+               in_degree, out_degree, downstream_reach, criticality_rank, hub_rank, authority_rank,
                source_id, target_id, connecting_tables, edge_table_count, edge_kinds, writer_count
         FROM {DAG_TABLE_NAME}
     """

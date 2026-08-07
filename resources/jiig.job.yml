@@ -1,5 +1,5 @@
 # The main job for jiig.
-# Both tasks read native system tables only — no auxiliary notebooks needed.
+# All three tasks read native system tables only — no auxiliary notebooks needed.
 resources:
   jobs:
     jiig_job:

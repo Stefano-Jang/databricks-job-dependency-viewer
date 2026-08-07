@@ -62,65 +62,131 @@ pipelines_latest AS (
 -- ============================================
 -- 2) Failed entities within the window
 -- ============================================
--- COUNT(DISTINCT run_id/update_id), not COUNT(*): one run can occupy several
--- timeline rows, which inflated failure_count before 2.0.
-failed_jobs AS (
+job_runs AS (
   SELECT
     jt.job_id,
-    MAX(COALESCE(jt.period_end_time, jt.period_start_time)) AS last_failed_time,
-    COUNT(DISTINCT jt.run_id)                               AS failure_count,
-    max_by(jt.termination_code, COALESCE(jt.period_end_time, jt.period_start_time)) AS failure_detail
+    jt.run_id,
+    MAX(COALESCE(jt.period_end_time, jt.period_start_time)) AS run_time,
+    max_by(jt.result_state,
+           CASE WHEN jt.result_state IS NOT NULL
+                THEN COALESCE(jt.period_end_time, jt.period_start_time) END) AS result_state,
+    max_by(jt.termination_code,
+           CASE WHEN jt.termination_code IS NOT NULL
+                THEN COALESCE(jt.period_end_time, jt.period_start_time) END) AS failure_detail
   FROM system.lakeflow.job_run_timeline jt
   CROSS JOIN time_bounds t
   WHERE jt.workspace_id = TARGET_WORKSPACE_ID
     AND jt.run_type = 'JOB_RUN'
-    AND jt.result_state IN ('FAILED', 'ERROR', 'TIMED_OUT')
     AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.failure_since_ts
-  GROUP BY jt.job_id
+  GROUP BY jt.job_id, jt.run_id
+),
+
+job_failure_history AS (
+  SELECT job_id, COUNT(*) AS failure_count
+  FROM job_runs
+  WHERE result_state IN ('FAILED', 'ERROR', 'TIMED_OUT')
+  GROUP BY job_id
+),
+
+latest_job_runs AS (
+  SELECT * FROM job_runs WHERE result_state IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY run_time DESC, run_id DESC) = 1
+),
+
+failed_jobs AS (
+  SELECT l.job_id, l.run_time AS last_failed_time, h.failure_count, l.failure_detail
+  FROM latest_job_runs l
+  JOIN job_failure_history h ON h.job_id = l.job_id
+  WHERE l.result_state IN ('FAILED', 'ERROR', 'TIMED_OUT')
+),
+
+pipeline_updates AS (
+  SELECT
+    put.pipeline_id,
+    put.update_id,
+    MAX(COALESCE(put.period_end_time, put.period_start_time)) AS update_time,
+    max_by(put.result_state,
+           CASE WHEN put.result_state IS NOT NULL
+                THEN COALESCE(put.period_end_time, put.period_start_time) END) AS result_state,
+    max_by(put.update_type, COALESCE(put.period_end_time, put.period_start_time)) AS update_type
+  FROM system.lakeflow.pipeline_update_timeline put
+  CROSS JOIN time_bounds t
+  WHERE put.workspace_id = TARGET_WORKSPACE_ID
+    AND put.update_type IN ('REFRESH', 'FULL_REFRESH')
+    AND COALESCE(put.period_end_time, put.period_start_time) >= t.failure_since_ts
+  GROUP BY put.pipeline_id, put.update_id
+),
+
+pipeline_failure_history AS (
+  SELECT pipeline_id, COUNT(*) AS failure_count
+  FROM pipeline_updates
+  WHERE result_state = 'FAILED'
+  GROUP BY pipeline_id
+),
+
+latest_pipeline_updates AS (
+  SELECT * FROM pipeline_updates WHERE result_state IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY pipeline_id ORDER BY update_time DESC, update_id DESC) = 1
 ),
 
 failed_pipelines AS (
   SELECT
-    put.pipeline_id,
-    MAX(COALESCE(put.period_end_time, put.period_start_time)) AS last_failed_time,
-    COUNT(DISTINCT put.update_id)                             AS failure_count,
-    max_by(CONCAT('update_type=', put.update_type, ', update_id=', put.update_id),
-           COALESCE(put.period_end_time, put.period_start_time)) AS failure_detail
-  FROM system.lakeflow.pipeline_update_timeline put
-  CROSS JOIN time_bounds t
-  WHERE put.workspace_id = TARGET_WORKSPACE_ID
-    AND put.result_state = 'FAILED'
-    AND put.update_type IN ('REFRESH', 'FULL_REFRESH')
-    AND COALESCE(put.period_end_time, put.period_start_time) >= t.failure_since_ts
-  GROUP BY put.pipeline_id
+    l.pipeline_id,
+    l.update_time AS last_failed_time,
+    h.failure_count,
+    CONCAT('update_type=', l.update_type, ', update_id=', l.update_id) AS failure_detail
+  FROM latest_pipeline_updates l
+  JOIN pipeline_failure_history h ON h.pipeline_id = l.pipeline_id
+  WHERE l.result_state = 'FAILED'
+),
+
+lineage_entity_owners AS (
+  SELECT entity_kind, entity_key, max_by(owner_email, owner_email IS NOT NULL) AS owner_email
+  FROM (
+    SELECT producer_kind AS entity_kind, producer_key AS entity_key,
+           producer_lineage_owner AS owner_email
+    FROM identifier(EDGE_TBL) WHERE result_type = 'EDGE'
+    UNION ALL
+    SELECT consumer_kind, consumer_key, consumer_lineage_owner
+    FROM identifier(EDGE_TBL) WHERE result_type = 'EDGE'
+  )
+  GROUP BY entity_kind, entity_key
 ),
 
 failed_entities AS (
   SELECT
     'JOB'                                       AS entity_kind,
-    j.job_id                                    AS entity_key,
-    CONCAT(j.name, CASE WHEN j.delete_time IS NOT NULL THEN ' [DELETED]' ELSE '' END) AS entity_name,
+    fj.job_id                                   AS entity_key,
+    COALESCE(
+      CONCAT(j.name, CASE WHEN j.delete_time IS NOT NULL THEN ' [DELETED]' ELSE '' END),
+      CONCAT('Job ', fj.job_id, ' [UNREGISTERED]')
+    )                                           AS entity_name,
     fj.last_failed_time,
     fj.failure_count,
     fj.failure_detail,
-    COALESCE(j.creator_user_name, j.creator_id) AS creator_email,
-    COALESCE(j.run_as_user_name, j.run_as)      AS run_as_email
+    COALESCE(j.creator_user_name, j.creator_id, o.owner_email) AS creator_email,
+    COALESCE(j.run_as_user_name, j.run_as, o.owner_email)      AS run_as_email
   FROM failed_jobs fj
-  JOIN jobs_latest j ON j.job_id = fj.job_id
+  LEFT JOIN jobs_latest j ON j.job_id = fj.job_id
+  LEFT JOIN lineage_entity_owners o ON o.entity_kind = 'JOB' AND o.entity_key = fj.job_id
 
   UNION ALL
 
   SELECT
     'PIPELINE',
-    p.pipeline_id,
-    CONCAT(p.name, CASE WHEN p.delete_time IS NOT NULL THEN ' [DELETED]' ELSE '' END),
+    fp.pipeline_id,
+    COALESCE(
+      CONCAT(p.name, CASE WHEN p.delete_time IS NOT NULL THEN ' [DELETED]' ELSE '' END),
+      CONCAT('Pipeline ', fp.pipeline_id, ' [UNREGISTERED]')
+    ),
     fp.last_failed_time,
     fp.failure_count,
     fp.failure_detail,
-    p.created_by,
-    p.run_as
+    COALESCE(p.created_by, o.owner_email),
+    COALESCE(p.run_as, o.owner_email)
   FROM failed_pipelines fp
-  JOIN pipelines_latest p ON p.pipeline_id = fp.pipeline_id
+  LEFT JOIN pipelines_latest p ON p.pipeline_id = fp.pipeline_id
+  LEFT JOIN lineage_entity_owners o ON o.entity_kind = 'PIPELINE' AND o.entity_key = fp.pipeline_id
 ),
 
 -- ============================================
@@ -164,6 +230,7 @@ impact AS (
     0                        AS hop,
     CAST(array() AS ARRAY<STRING>) AS entering_tables,
     CAST(array() AS ARRAY<STRING>) AS entering_kinds,
+    CAST(array() AS ARRAY<STRING>) AS path_tables,
     array(concat_ws(':', f.entity_kind, f.entity_key)) AS path_keys,
     array(f.entity_name)     AS path_names
   FROM failed_entities f
@@ -178,9 +245,17 @@ impact AS (
     i.hop + 1,
     e.edge_tables,
     e.edge_kinds,
+    array_distinct(concat(i.path_tables, e.edge_tables)),
     array_append(i.path_keys, concat_ws(':', e.consumer_kind, e.consumer_key)),
-    array_append(i.path_names, COALESCE(cm.entity_name,
-                                        CONCAT(initcap(lower(e.consumer_kind)), ' ', e.consumer_key)))
+    concat(
+      i.path_names,
+      CASE
+        WHEN size(e.edge_tables) > 0 THEN array(concat_ws(', ', e.edge_tables))
+        ELSE array(concat_ws('+', e.edge_kinds))
+      END,
+      array(COALESCE(cm.entity_name,
+                     CONCAT(initcap(lower(e.consumer_kind)), ' ', e.consumer_key)))
+    )
   FROM impact i
   JOIN all_edges e
     ON e.producer_kind = i.affected_kind AND e.producer_key = i.affected_key
@@ -205,7 +280,7 @@ impact_shortest AS (
   SELECT
     i.failed_kind, i.failed_key, i.affected_kind, i.affected_key,
     m.hop_distance,
-    concat_ws(', ', array_sort(array_distinct(flatten(collect_list(i.entering_tables))))) AS affected_tables,
+    concat_ws(', ', array_sort(array_distinct(flatten(collect_list(i.path_tables)))))     AS affected_tables,
     array_sort(array_distinct(flatten(collect_list(i.entering_kinds))))                   AS affected_via,
     MIN(concat_ws(' -> ', i.path_names)) AS impact_path
   FROM impact i

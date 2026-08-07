@@ -1,4 +1,4 @@
-# The main job for jiig.
+# The managed AI/BI companion dashboard for JIIG.
 resources:
   dashboards:
     jiig_dashboard:

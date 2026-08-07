@@ -86,37 +86,94 @@ pipelines_latest AS (
 -- ============================================
 -- COUNT(DISTINCT run_id/update_id), not COUNT(*): the timeline tables can hold
 -- several rows for one run, which inflated failure_count before 2.0.
-failed_jobs AS (
+job_runs AS (
   SELECT
     jt.job_id,
-    MAX(COALESCE(jt.period_end_time, jt.period_start_time)) AS last_failed_time,
-    MIN(COALESCE(jt.period_end_time, jt.period_start_time)) AS first_failed_time,
-    COUNT(DISTINCT jt.run_id)                               AS failure_count,
-    max_by(jt.termination_code, COALESCE(jt.period_end_time, jt.period_start_time)) AS failure_detail
+    jt.run_id,
+    MAX(COALESCE(jt.period_end_time, jt.period_start_time)) AS run_time,
+    max_by(jt.result_state,
+           CASE WHEN jt.result_state IS NOT NULL
+                THEN COALESCE(jt.period_end_time, jt.period_start_time) END) AS result_state,
+    max_by(jt.termination_code,
+           CASE WHEN jt.termination_code IS NOT NULL
+                THEN COALESCE(jt.period_end_time, jt.period_start_time) END) AS failure_detail
   FROM system.lakeflow.job_run_timeline jt
   CROSS JOIN time_bounds t
   WHERE jt.workspace_id = TARGET_WORKSPACE_ID
     AND jt.run_type = 'JOB_RUN'
-    AND jt.result_state IN ('FAILED', 'ERROR', 'TIMED_OUT')
     AND COALESCE(jt.period_end_time, jt.period_start_time) >= t.failure_since_ts
-  GROUP BY jt.job_id
+  GROUP BY jt.job_id, jt.run_id
+),
+
+job_failure_history AS (
+  SELECT
+    job_id,
+    MIN(run_time) AS first_failed_time,
+    COUNT(*) AS failure_count
+  FROM job_runs
+  WHERE result_state IN ('FAILED', 'ERROR', 'TIMED_OUT')
+  GROUP BY job_id
+),
+
+latest_job_runs AS (
+  SELECT * FROM job_runs WHERE result_state IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY run_time DESC, run_id DESC) = 1
+),
+
+failed_jobs AS (
+  SELECT
+    l.job_id,
+    l.run_time AS last_failed_time,
+    h.first_failed_time,
+    h.failure_count,
+    l.failure_detail
+  FROM latest_job_runs l
+  JOIN job_failure_history h ON h.job_id = l.job_id
+  WHERE l.result_state IN ('FAILED', 'ERROR', 'TIMED_OUT')
+),
+
+pipeline_updates AS (
+  SELECT
+    put.pipeline_id,
+    put.update_id,
+    MAX(COALESCE(put.period_end_time, put.period_start_time)) AS update_time,
+    max_by(put.result_state,
+           CASE WHEN put.result_state IS NOT NULL
+                THEN COALESCE(put.period_end_time, put.period_start_time) END) AS result_state,
+    max_by(put.update_type, COALESCE(put.period_end_time, put.period_start_time)) AS update_type
+  FROM system.lakeflow.pipeline_update_timeline put
+  CROSS JOIN time_bounds t
+  WHERE put.workspace_id = TARGET_WORKSPACE_ID
+    AND put.update_type IN ('REFRESH', 'FULL_REFRESH')
+    AND COALESCE(put.period_end_time, put.period_start_time) >= t.failure_since_ts
+  GROUP BY put.pipeline_id, put.update_id
+),
+
+pipeline_failure_history AS (
+  SELECT
+    pipeline_id,
+    MIN(update_time) AS first_failed_time,
+    COUNT(*) AS failure_count
+  FROM pipeline_updates
+  WHERE result_state = 'FAILED'
+  GROUP BY pipeline_id
+),
+
+latest_pipeline_updates AS (
+  SELECT * FROM pipeline_updates WHERE result_state IS NOT NULL
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY pipeline_id ORDER BY update_time DESC, update_id DESC) = 1
 ),
 
 failed_pipelines AS (
   SELECT
-    put.pipeline_id,
-    MAX(COALESCE(put.period_end_time, put.period_start_time)) AS last_failed_time,
-    MIN(COALESCE(put.period_end_time, put.period_start_time)) AS first_failed_time,
-    COUNT(DISTINCT put.update_id)                             AS failure_count,
-    max_by(CONCAT('update_type=', put.update_type, ', update_id=', put.update_id),
-           COALESCE(put.period_end_time, put.period_start_time)) AS failure_detail
-  FROM system.lakeflow.pipeline_update_timeline put
-  CROSS JOIN time_bounds t
-  WHERE put.workspace_id = TARGET_WORKSPACE_ID
-    AND put.result_state = 'FAILED'
-    AND put.update_type IN ('REFRESH', 'FULL_REFRESH')
-    AND COALESCE(put.period_end_time, put.period_start_time) >= t.failure_since_ts
-  GROUP BY put.pipeline_id
+    l.pipeline_id,
+    l.update_time AS last_failed_time,
+    h.first_failed_time,
+    h.failure_count,
+    CONCAT('update_type=', l.update_type, ', update_id=', l.update_id) AS failure_detail
+  FROM latest_pipeline_updates l
+  JOIN pipeline_failure_history h ON h.pipeline_id = l.pipeline_id
+  WHERE l.result_state = 'FAILED'
 ),
 
 -- ============================================
@@ -226,33 +283,50 @@ edge_endpoints AS (
   SELECT consumer_kind, consumer_key, consumer_lineage_owner FROM edges_src
 ),
 
+endpoint_owners AS (
+  SELECT
+    node_kind,
+    node_id,
+    max_by(owner_email, owner_email IS NOT NULL) AS owner_email
+  FROM edge_endpoints
+  GROUP BY node_kind, node_id
+),
+
 unresolved_nodes AS (
   SELECT
-    ep.node_kind,
-    ep.node_id,
-    lower(ep.node_kind)                            AS node_type,
-    CASE WHEN ep.node_kind IN ('JOB', 'PIPELINE') THEN 'UNREGISTERED' END AS node_subtype,
+    c.entity_kind                                  AS node_kind,
+    c.entity_key                                   AS node_id,
+    lower(c.entity_kind)                           AS node_type,
+    CASE WHEN c.entity_kind IN ('JOB', 'PIPELINE') THEN 'UNREGISTERED' END AS node_subtype,
     CASE
-      WHEN ep.node_kind IN ('JOB', 'PIPELINE')
-        THEN CONCAT(initcap(lower(ep.node_kind)), ' ', ep.node_id)
-      ELSE CONCAT(initcap(lower(ep.node_kind)), ' ', substr(ep.node_id, 1, 8))
+      WHEN c.entity_kind IN ('JOB', 'PIPELINE')
+        THEN CONCAT(initcap(lower(c.entity_kind)), ' ', c.entity_key)
+      ELSE CONCAT(initcap(lower(c.entity_kind)), ' ', substr(c.entity_key, 1, 8))
     END                                            AS node_name,
-    CASE WHEN ep.node_kind IN ('JOB', 'PIPELINE')
+    CASE WHEN c.entity_kind IN ('JOB', 'PIPELINE')
          THEN 'Seen in lineage only (no current metadata row)' END AS node_description,
-    max_by(ep.owner_email, ep.owner_email IS NOT NULL) AS node_creator_email,
-    max_by(ep.owner_email, ep.owner_email IS NOT NULL) AS node_run_as_email,
-    false                                          AS node_is_failed,
-    CAST(NULL AS TIMESTAMP)                        AS node_last_failed_time,
-    CAST(NULL AS TIMESTAMP)                        AS node_first_failed_time,
-    0                                              AS node_failure_count,
-    CAST(NULL AS STRING)                           AS node_failure_detail,
-    CAST(NULL AS TIMESTAMP)                        AS node_last_activity_time,
+    ep.owner_email                                 AS node_creator_email,
+    ep.owner_email                                 AS node_run_as_email,
+    CASE
+      WHEN c.entity_kind = 'JOB' THEN fj.job_id IS NOT NULL
+      WHEN c.entity_kind = 'PIPELINE' THEN fp.pipeline_id IS NOT NULL
+      ELSE false
+    END                                            AS node_is_failed,
+    COALESCE(fj.last_failed_time, fp.last_failed_time) AS node_last_failed_time,
+    COALESCE(fj.first_failed_time, fp.first_failed_time) AS node_first_failed_time,
+    COALESCE(fj.failure_count, fp.failure_count, 0) AS node_failure_count,
+    COALESCE(fj.failure_detail, fp.failure_detail)  AS node_failure_detail,
+    COALESCE(ja.last_activity_time, pa.last_activity_time) AS node_last_activity_time,
     CAST(NULL AS TIMESTAMP)                        AS node_created_time
-  FROM edge_endpoints ep
-  LEFT JOIN job_nodes      jn ON jn.node_kind = ep.node_kind AND jn.node_id = ep.node_id
-  LEFT JOIN pipeline_nodes pn ON pn.node_kind = ep.node_kind AND pn.node_id = ep.node_id
+  FROM candidate_entities c
+  LEFT JOIN endpoint_owners ep ON ep.node_kind = c.entity_kind AND ep.node_id = c.entity_key
+  LEFT JOIN job_nodes      jn ON jn.node_kind = c.entity_kind AND jn.node_id = c.entity_key
+  LEFT JOIN pipeline_nodes pn ON pn.node_kind = c.entity_kind AND pn.node_id = c.entity_key
+  LEFT JOIN failed_jobs fj ON c.entity_kind = 'JOB' AND fj.job_id = c.entity_key
+  LEFT JOIN failed_pipelines fp ON c.entity_kind = 'PIPELINE' AND fp.pipeline_id = c.entity_key
+  LEFT JOIN job_activity ja ON c.entity_kind = 'JOB' AND ja.job_id = c.entity_key
+  LEFT JOIN pipeline_activity pa ON c.entity_kind = 'PIPELINE' AND pa.pipeline_id = c.entity_key
   WHERE jn.node_id IS NULL AND pn.node_id IS NULL
-  GROUP BY ep.node_kind, ep.node_id
 ),
 
 all_nodes AS (
@@ -336,7 +410,8 @@ node_metrics AS (
 -- ============================================
 SELECT
   'NODES'                       AS result_type,
-  node_id                       AS id,
+  node_key                      AS id,
+  node_id                       AS entity_id,
   node_type                     AS type,
   node_subtype                  AS subtype,
   node_name                     AS name,
@@ -351,11 +426,14 @@ SELECT
   node_last_activity_time       AS last_activity_time,
   node_created_time             AS created_time,
   CASE WHEN node_is_failed THEN 'FAILED' ELSE 'HEALTHY' END AS status,
+  current_timestamp()           AS snapshot_time,
   in_degree,
   out_degree,
   downstream_reach,
   -- 1 = most critical. Ranks by blast radius, then direct consumers.
-  CAST(RANK() OVER (ORDER BY downstream_reach DESC, out_degree DESC) AS INT) AS criticality_rank,
+  CAST(ROW_NUMBER() OVER (ORDER BY downstream_reach DESC, out_degree DESC, node_key) AS INT) AS criticality_rank,
+  CAST(ROW_NUMBER() OVER (ORDER BY downstream_reach DESC, out_degree DESC, node_key) AS INT) AS hub_rank,
+  CAST(ROW_NUMBER() OVER (ORDER BY in_degree DESC, downstream_reach DESC, node_key) AS INT) AS authority_rank,
   CAST(NULL AS STRING)          AS source_id,
   CAST(NULL AS STRING)          AS target_id,
   CAST(NULL AS STRING)          AS connecting_tables,
@@ -368,7 +446,8 @@ UNION ALL
 
 SELECT
   'EDGES'                       AS result_type,
-  CONCAT(producer_key, '->', consumer_key) AS id,
+  CONCAT(producer_kind, ':', producer_key, '->', consumer_kind, ':', consumer_key) AS id,
+  CAST(NULL AS STRING)          AS entity_id,
   lower(concat_ws('+', edge_kinds))        AS type,
   CAST(NULL AS STRING)          AS subtype,
   CONCAT(producer_key, ' -> ', consumer_key) AS name,
@@ -385,12 +464,15 @@ SELECT
   CAST(NULL AS TIMESTAMP)       AS last_activity_time,
   CAST(NULL AS TIMESTAMP)       AS created_time,
   'ACTIVE'                      AS status,
+  current_timestamp()           AS snapshot_time,
   CAST(NULL AS BIGINT)          AS in_degree,
   CAST(NULL AS BIGINT)          AS out_degree,
   CAST(NULL AS BIGINT)          AS downstream_reach,
   CAST(NULL AS INT)             AS criticality_rank,
-  producer_key                  AS source_id,
-  consumer_key                  AS target_id,
+  CAST(NULL AS INT)             AS hub_rank,
+  CAST(NULL AS INT)             AS authority_rank,
+  concat_ws(':', producer_kind, producer_key) AS source_id,
+  concat_ws(':', consumer_kind, consumer_key) AS target_id,
   concat_ws(', ', edge_tables)  AS connecting_tables,
   edge_table_count,
   edge_kinds,
@@ -403,7 +485,8 @@ UNION ALL
 -- carried through because "300 jobs write this one table" is worth surfacing.
 SELECT
   'SHARED_TABLES'               AS result_type,
-  table_full_name               AS id,
+  CONCAT('TABLE:', table_full_name) AS id,
+  table_full_name               AS entity_id,
   'table'                       AS type,
   CAST(NULL AS STRING)          AS subtype,
   table_full_name               AS name,
@@ -412,7 +495,9 @@ SELECT
   CAST(NULL AS TIMESTAMP), CAST(NULL AS TIMESTAMP), CAST(NULL AS BIGINT),
   CAST(NULL AS STRING), CAST(NULL AS TIMESTAMP), CAST(NULL AS TIMESTAMP),
   'SHARED'                      AS status,
+  current_timestamp()           AS snapshot_time,
   CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS BIGINT), CAST(NULL AS INT),
+  CAST(NULL AS INT), CAST(NULL AS INT),
   CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS INT),
   CAST(NULL AS ARRAY<STRING>),
   writer_count

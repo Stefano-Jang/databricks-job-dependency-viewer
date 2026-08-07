@@ -2,7 +2,7 @@
   "datasets": [
     {
       "name": "0194d28f",
-      "displayName": "Job Run Failure Analysis - Timeline Data",
+      "displayName": "Open incident impact paths",
       "queryLines": [
         "SELECT * FROM jiig_dashboard\n"
       ]
@@ -11,7 +11,7 @@
   "pages": [
     {
       "name": "5f01cc7c",
-      "displayName": "Failed Entity",
+      "displayName": "Incident Overview",
       "layout": [
         {
           "widget": {
@@ -78,12 +78,12 @@
             "name": "1145dba4",
             "multilineTextboxSpec": {
               "lines": [
-                "# Job & Pipeline Failed List\n",
-                "- Impact analysis follows table lineage from system.access.table_lineage and job→pipeline trigger links, up to N downstream hops (hop_distance, impact_path columns).\n",
-                "- Job failures: system.lakeflow.job_run_timeline with states ERROR, FAILED, or TIMED_OUT.\n",
-                "- Pipeline (Lakeflow Spark Declarative Pipelines) failures: system.lakeflow.pipeline_update_timeline with result_state FAILED on REFRESH / FULL_REFRESH updates.\n",
-                "- Owner emails come directly from the system tables (creator_user_name / run_as_user_name); rows older than Dec 2025 may show numeric IDs instead.\n",
-                "- No auxiliary tables are required — everything is computed from native system tables by the JIIG job.\n"
+                "# Open incidents and downstream exposure\n",
+                "- Each row connects a currently failing Job or Pipeline to one potentially stale downstream asset.\n",
+                "- Start with the affected count, then use hop distance and the causal path to understand how impact propagates.\n",
+                "- Impact paths include intermediate tables and orchestration triggers so responders can verify the dependency evidence.\n",
+                "- Owner fields identify who should validate, rerun, or communicate about the affected asset.\n",
+                "- The companion JIIG App provides the interactive graph, root/cascade evidence, hub ranking, and notification brief.\n"
               ]
             }
           },
@@ -130,7 +130,7 @@
               },
               "frame": {
                 "showTitle": true,
-                "title": "Failed Entity IDs",
+                "title": "Open Incidents",
                 "showDescription": true,
                 "description": "Distinct count of failed Jobs or Pipelines"
               }
@@ -179,9 +179,9 @@
               },
               "frame": {
                 "showTitle": true,
-                "title": "Affected Entity IDs",
+                "title": "Affected Assets",
                 "showDescription": true,
-                "description": "Distinct count of affected Jobs or Pipelines"
+                "description": "Distinct downstream Jobs, Pipelines, dashboards, Genie spaces, queries, and alerts"
               }
             }
           },
@@ -228,9 +228,9 @@
               },
               "frame": {
                 "showTitle": true,
-                "title": "Affected Creator Emails",
+                "title": "Owners to Notify",
                 "showDescription": true,
-                "description": "Distinct count of affected creator emails"
+                "description": "Distinct downstream asset owners identified from native metadata"
               }
             }
           },
@@ -277,7 +277,7 @@
               },
               "frame": {
                 "showTitle": true,
-                "title": "Last failed time (UTC+0)",
+                "title": "Latest Open Failure (UTC)",
                 "showDescription": true,
                 "description": "Latest time of job or pipeline failed"
               }
@@ -620,12 +620,12 @@
                     "imageTitleTemplate": "{{ @ }}",
                     "imageWidth": "",
                     "imageHeight": "",
-                    "linkUrlTemplate": "/{{affected_type}}s/{{affected_id}}",
+                    "linkUrlTemplate": "{{ @ }}",
                     "linkTextTemplate": "{{ @ }}",
                     "linkTitleTemplate": "{{ @ }}",
                     "linkOpenInNewTab": true,
                     "type": "string",
-                    "displayAs": "link",
+                    "displayAs": "string",
                     "visible": true,
                     "order": 4,
                     "title": "affected_id",
@@ -884,11 +884,11 @@
     "locale": "en-US",
     "theme": {
       "canvasBackgroundColor": {
-        "light": "#FFFFFF",
+        "light": "#F4F6F8",
         "dark": "#11171C"
       },
       "widgetBackgroundColor": {
-        "light": "#FFFFFF",
+        "light": "#DDE3EA",
         "dark": "#11171C"
       },
       "widgetBorderColor": {
@@ -896,24 +896,24 @@
         "dark": "#11171C"
       },
       "fontColor": {
-        "light": "#11171C",
+        "light": "#101828",
         "dark": "#E8ECF0"
       },
       "selectionColor": {
-        "light": "#2272B4",
+        "light": "#246BFD",
         "dark": "#8ACAFF"
       },
       "visualizationColors": [
-        "#077A9D",
-        "#FFAB00",
-        "#00A972",
-        "#FF3621",
-        "#8BCAE7",
-        "#AB4057",
-        "#99DDB4",
-        "#FCA4A1",
-        "#919191",
-        "#BF7080"
+        "#246BFD",
+        "#EAAA08",
+        "#067647",
+        "#D92D20",
+        "#2E6F95",
+        "#7A5AF8",
+        "#12B76A",
+        "#F97066",
+        "#667085",
+        "#B54708"
       ],
       "widgetHeaderAlignment": "LEFT"
     }
